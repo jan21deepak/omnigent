@@ -1151,12 +1151,9 @@ async def _attach_terminal(
 _AGY_COLD_START_PORT_TIMEOUT_S = 20.0
 _AGY_COLD_START_PORT_POLL_INTERVAL_S = 0.25
 
-# Model-readiness budget for the CLI fallback. agy binds its connect-RPC port
-# BEFORE post-login model initialization finishes, so a bound port is not proof
-# of readiness: a ``StartCascade`` while ``GetAvailableModels`` is still empty can
-# drop the native runner (surfaced only as ``runner_disconnected``). The
-# cold-start polls the catalog until it is non-empty, then stabilizes briefly
-# before minting the cascade. Mirrors the runner's model-readiness constants.
+# Model-readiness budget for the CLI fallback (mirrors the runner's). agy binds
+# its RPC port before model init finishes, so the cold-start polls the catalog
+# (then stabilizes) before StartCascade to avoid a runner-dropping race.
 _AGY_COLD_START_MODEL_TIMEOUT_S = 30.0
 _AGY_COLD_START_MODEL_POLL_INTERVAL_S = 0.25
 _AGY_COLD_START_MODEL_STABILIZE_S = 4.0
@@ -1339,10 +1336,9 @@ async def _cold_start_agy_conversation(
             return
         await _agy_cold_start_poll_sleep(_AGY_COLD_START_PORT_POLL_INTERVAL_S)
 
-    # The port binds before agy finishes post-login model initialization; wait
-    # for an observable readiness signal (a non-empty model catalog, then a short
-    # stabilization) before creating the cascade, so StartCascade does not race
-    # initialization and drop the runner (``runner_disconnected``).
+    # The port binds before agy finishes model init; wait for a non-empty model
+    # catalog (then a short stabilization) before StartCascade so it does not race
+    # initialization and drop the runner.
     await _await_agy_model_readiness(port, session_id)
 
     cascade_id = str(uuid.uuid4())

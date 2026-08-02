@@ -2164,9 +2164,9 @@ async def test_runner_cold_start_awaits_model_readiness_before_start_cascade(
     """
     The runner cold-start gates ``StartCascade`` on the model-readiness wait.
 
-    Regression for issue #2: a bound connect-RPC port is not sufficient readiness
-    — a fresh agy accepts requests before post-login model init completes and a
-    premature ``StartCascade`` drops the runner. The cold-start must await
+    A bound connect-RPC port is not sufficient readiness — a fresh agy accepts
+    requests before post-login model init completes and a premature
+    ``StartCascade`` drops the runner. The cold-start must await
     ``_await_agy_model_readiness`` (with the resolved port) BEFORE StartCascade.
     """
     import omnigent.antigravity_native_rpc as rpc_mod

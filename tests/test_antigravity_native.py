@@ -1364,9 +1364,9 @@ async def test_cli_cold_start_awaits_model_readiness_before_start_cascade(
     """
     The cold-start gates ``StartCascade`` on the model-readiness wait.
 
-    Regression for issue #2: the port binding is not sufficient readiness. The
-    cold-start must call ``_await_agy_model_readiness`` (with the resolved port)
-    BEFORE issuing ``StartCascade``.
+    A freshly authenticated agy answers RPC before model init completes, so the
+    bound port is not sufficient readiness. The cold-start must call
+    ``_await_agy_model_readiness`` (with the resolved port) BEFORE ``StartCascade``.
     """
     monkeypatch.setattr(bridge_mod, "_BRIDGE_ROOT", tmp_path / "antigravity-native")
     bridge_dir = bridge_mod.bridge_dir_for_bridge_id("bridge_cs_gate")
