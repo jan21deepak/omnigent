@@ -7,8 +7,9 @@ directories or worktrees" guardrail: an agent confined to a workspace should
 not be able to ``cd`` elsewhere or spin up / relocate a linked worktree and
 operate from there.
 
-It gates two things, dispatched off ``sys_os_shell`` (the built-in OS shell
-tool) ``command`` strings:
+It gates two things, dispatched off the ``command`` strings of the shell tool
+of every supported harness family (``sys_os_shell``, ``Bash``, ``bash``,
+``Shell``, ``terminal``, ``developer__shell``):
 
 - **Directory changes** (``block_cd``) — ``cd`` / ``chdir`` / ``pushd`` /
   ``popd`` shell built-ins, plus ``git -C <path> …`` (which runs git as if in
@@ -53,6 +54,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from omnigent.policies.builtins._shell import (
+    DEFAULT_SHELL_TOOLS,
     MAX_SHELL_NESTING,
     real_invocation_tokens,
     split_command_segments,
@@ -75,10 +77,9 @@ _GIT_VALUE_OPTS: frozenset[str] = frozenset(
     {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
 )
 
-# Shell tools whose command string this policy parses, by default.
-# Includes both the Omnigent built-in OS shell and Claude Code / Codex
-# native ``Bash`` tool (surfaced via the ``PreToolUse`` hook contract).
-_DEFAULT_SHELL_TOOLS: tuple[str, ...] = ("sys_os_shell", "Bash")
+# Shell tools whose command string this policy parses, by default: the shell
+# tool of every supported harness family.
+_DEFAULT_SHELL_TOOLS: tuple[str, ...] = DEFAULT_SHELL_TOOLS
 
 
 @dataclass(frozen=True)
@@ -270,9 +271,10 @@ def block_working_dir_changes(
     :param action: What a gated command yields — ``"deny"`` (block it) or
         ``"ask"`` (park for human approval). Defaults to ``"deny"``.
     :param shell_tools: Names of the shell tools whose ``command`` argument is
-        parsed. ``None`` uses the defaults: ``["sys_os_shell", "Bash"]``
-        (Omnigent built-in + Claude/Codex native). Commands run through
-        a tool not listed here are not inspected.
+        parsed. ``None`` uses the shell tool of every supported harness family
+        (``sys_os_shell``, ``Bash``, ``bash``, ``Shell``, ``terminal``,
+        ``developer__shell``). Commands run through a tool not listed here are
+        not inspected.
     :returns: A one-argument policy callable returning a :class:`PolicyResponse`
         (DENY / ASK) on a gated command, or ``None`` to abstain (ALLOW).
     :raises ValueError: If *action* is not ``"deny"`` / ``"ask"``, or if both
@@ -464,7 +466,8 @@ POLICY_REGISTRY: list[dict[str, Any]] = [  # type: ignore[explicit-any]
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Shell tools whose command arg is parsed "
-                    "(default: sys_os_shell, Bash).",
+                    "(default: sys_os_shell, Bash, bash, Shell, terminal, "
+                    "developer__shell).",
                 },
             },
         },

@@ -447,6 +447,23 @@ def test_shell_unparseable_git_command_asks() -> None:
     assert result is not None and result["result"] == "ASK"
 
 
+@pytest.mark.parametrize(
+    "tool",
+    ["sys_os_shell", "Bash", "bash", "Shell", "terminal", "developer__shell"],
+)
+def test_default_shell_tools_cover_every_harness(tool: str) -> None:
+    """Every harness family's shell tool is inspected for git/gh by default.
+
+    Without this, a ``git push`` to a non-allowlisted repo on a native harness
+    (claude/codex ``Bash``, cursor ``Shell``, pi ``bash``, hermes ``terminal``,
+    goose ``developer__shell``) is never seen by the policy.
+    """
+    policy = github_policy(read_all=True, write_repos=[_REPO])
+    event = tc(tool, {"command": "git push https://github.com/other/repo main"})
+    result = policy(event)
+    assert result is not None and result["result"] == "DENY"
+
+
 def test_shell_tools_param_overrides_default_tool() -> None:
     """A custom shell tool name is parsed when listed in ``shell_tools``.
 
