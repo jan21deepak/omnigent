@@ -1815,6 +1815,14 @@ async def _run_antigravity_auto_create(
         return None
 
     monkeypatch.setattr(runner_app_mod, "_agy_cold_start_poll_sleep", _no_sleep)
+
+    # Skip the post-port model-readiness gate: with a fake port a real poll would
+    # spin on ``GetAvailableModels`` until the model deadline. These tests exercise
+    # port resolution + StartCascade, not the readiness wait (covered separately).
+    async def _skip_model_readiness(*_args: Any, **_kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(runner_app_mod, "_await_agy_model_readiness", _skip_model_readiness)
     monkeypatch.setattr(rpc_mod, "_candidate_agy_rpc_ports", lambda: list(candidate_ports))
     start_cascade_calls: list[tuple[int, str]] = []
 
@@ -2146,6 +2154,53 @@ async def test_cold_start_agy_conversation_returns_early_on_real_id_in_bridge_st
     state = bridge_mod.read_bridge_state(bridge_dir)
     assert state is not None
     assert state.conversation_id == real_id
+
+
+@pytest.mark.asyncio
+async def test_runner_cold_start_awaits_model_readiness_before_start_cascade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The runner cold-start gates ``StartCascade`` on the model-readiness wait.
+
+    Regression for issue #2: a bound connect-RPC port is not sufficient readiness
+    — a fresh agy accepts requests before post-login model init completes and a
+    premature ``StartCascade`` drops the runner. The cold-start must await
+    ``_await_agy_model_readiness`` (with the resolved port) BEFORE StartCascade.
+    """
+    import omnigent.antigravity_native_rpc as rpc_mod
+    from omnigent import antigravity_native_bridge as bridge_mod
+    from omnigent.runner import app as runner_app_mod
+    from omnigent.runner.native import orchestration as orch_mod
+
+    monkeypatch.setattr(bridge_mod, "_BRIDGE_ROOT", tmp_path / "antigravity-native")
+    session_id = "1a2b3c4d5e6f70819273645566778899"
+    bridge_dir = bridge_mod.prepare_bridge_dir(session_id)
+    bridge_mod.write_bridge_state(
+        bridge_dir,
+        bridge_mod.AntigravityNativeBridgeState(
+            session_id=session_id,
+            conversation_id="agy_conv_placeholder",
+        ),
+    )
+
+    monkeypatch.setattr(rpc_mod, "resolve_cold_start_agy_rpc_port", lambda _sock, _tgt: 52548)
+
+    order: list[str] = []
+
+    async def _spy_readiness(port: int, _session_id: str, **_kwargs: Any) -> bool:
+        order.append(f"readiness:{port}")
+        return True
+
+    monkeypatch.setattr(orch_mod, "_await_agy_model_readiness", _spy_readiness)
+    monkeypatch.setattr(
+        rpc_mod, "start_cascade", lambda port, _cid: order.append(f"start_cascade:{port}")
+    )
+
+    await runner_app_mod._cold_start_agy_conversation(bridge_dir, session_id)
+
+    assert order == ["readiness:52548", "start_cascade:52548"]
 
 
 @pytest.mark.asyncio

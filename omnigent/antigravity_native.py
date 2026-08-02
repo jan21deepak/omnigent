@@ -1151,6 +1151,16 @@ async def _attach_terminal(
 _AGY_COLD_START_PORT_TIMEOUT_S = 20.0
 _AGY_COLD_START_PORT_POLL_INTERVAL_S = 0.25
 
+# Model-readiness budget for the CLI fallback. agy binds its connect-RPC port
+# BEFORE post-login model initialization finishes, so a bound port is not proof
+# of readiness: a ``StartCascade`` while ``GetAvailableModels`` is still empty can
+# drop the native runner (surfaced only as ``runner_disconnected``). The
+# cold-start polls the catalog until it is non-empty, then stabilizes briefly
+# before minting the cascade. Mirrors the runner's model-readiness constants.
+_AGY_COLD_START_MODEL_TIMEOUT_S = 30.0
+_AGY_COLD_START_MODEL_POLL_INTERVAL_S = 0.25
+_AGY_COLD_START_MODEL_STABILIZE_S = 4.0
+
 
 async def _agy_cold_start_poll_sleep(seconds: float) -> None:
     """
@@ -1164,6 +1174,72 @@ async def _agy_cold_start_poll_sleep(seconds: float) -> None:
     :returns: None.
     """
     await asyncio.sleep(seconds)
+
+
+async def _await_agy_model_readiness(
+    port: int,
+    session_id: str,
+    *,
+    timeout_s: float = _AGY_COLD_START_MODEL_TIMEOUT_S,
+    poll_interval_s: float = _AGY_COLD_START_MODEL_POLL_INTERVAL_S,
+    stabilize_s: float = _AGY_COLD_START_MODEL_STABILIZE_S,
+) -> bool:
+    """
+    Wait for agy to report an initialized model catalog before ``StartCascade``.
+
+    A freshly authenticated agy accepts connect-RPC requests before its
+    post-login model initialization is complete, so a bound port is not proof of
+    readiness. Creating the cascade in that window can drop the native runner
+    (observed only as ``runner_disconnected``). This polls
+    :func:`omnigent.antigravity_native_rpc.get_available_models` until its
+    ``models`` mapping is non-empty, then waits *stabilize_s* so agy's
+    initialization settles before the cold-start mints the cascade. Mirrors
+    :func:`omnigent.runner.app._await_agy_model_readiness`.
+
+    Best-effort: a poll error (agy momentarily unreachable / non-JSON) is treated
+    as "not ready yet" and retried. If the catalog never fills within *timeout_s*
+    this logs and returns ``False`` so the caller still attempts ``StartCascade``
+    (preserving the prior behavior as a fallback). The sync RPC work runs in
+    :func:`asyncio.to_thread`.
+
+    :param port: agy's validated connect-RPC port.
+    :param session_id: Owning session id (for log correlation).
+    :param timeout_s: Total seconds to wait for a non-empty catalog.
+    :param poll_interval_s: Seconds between catalog polls.
+    :param stabilize_s: Seconds to wait after the catalog first reports models.
+    :returns: ``True`` once a non-empty catalog was observed (after stabilizing),
+        ``False`` on timeout.
+    """
+    from omnigent.antigravity_native_rpc import get_available_models
+
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            catalog = await asyncio.to_thread(get_available_models, port)
+        except (httpx.HTTPError, ValueError, OSError):
+            catalog = {}
+        models = catalog.get("models") if isinstance(catalog, dict) else None
+        if isinstance(models, dict) and models:
+            _logger.info(
+                "Antigravity cold-start: agy model catalog ready on port %s for session %s; "
+                "stabilizing %.1fs before StartCascade.",
+                port,
+                session_id,
+                stabilize_s,
+            )
+            if stabilize_s > 0:
+                await _agy_cold_start_poll_sleep(stabilize_s)
+            return True
+        if time.monotonic() >= deadline:
+            _logger.warning(
+                "Antigravity cold-start: agy model catalog still empty after %.0fs on port %s "
+                "for session %s; proceeding with StartCascade anyway.",
+                timeout_s,
+                port,
+                session_id,
+            )
+            return False
+        await _agy_cold_start_poll_sleep(poll_interval_s)
 
 
 async def _cold_start_agy_conversation(
@@ -1262,6 +1338,12 @@ async def _cold_start_agy_conversation(
             )
             return
         await _agy_cold_start_poll_sleep(_AGY_COLD_START_PORT_POLL_INTERVAL_S)
+
+    # The port binds before agy finishes post-login model initialization; wait
+    # for an observable readiness signal (a non-empty model catalog, then a short
+    # stabilization) before creating the cascade, so StartCascade does not race
+    # initialization and drop the runner (``runner_disconnected``).
+    await _await_agy_model_readiness(port, session_id)
 
     cascade_id = str(uuid.uuid4())
     try:
