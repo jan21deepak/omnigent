@@ -1552,6 +1552,90 @@ async def _execute_list_models_tool(*, agent_spec: AgentSpec | None) -> str:
     return json.dumps(catalog)
 
 
+def _existing_child_dispatch_error(
+    child: _JsonObject,
+    child_session_id: str,
+    *,
+    sub_agent_name: str,
+    session_name: str,
+    model: str | None,
+    file_ids: list[str],
+    cost_budget: _JsonObject | None,
+) -> str | None:
+    """
+    Reject a dispatch that cannot be applied to an already-live child.
+
+    ``model``, ``file_ids`` and ``cost_budget`` are all baked in at child
+    creation (native harnesses take ``--model`` at terminal launch, the
+    budget is a policy attached to the fresh row), so on a child that
+    already exists they would be silently dropped — the caller must be
+    told instead. A child mid-turn is likewise refused: a second message
+    would interleave two turns on one sub-agent.
+
+    :param child: Child-session listing row, e.g.
+        ``{"id": "conv_c1", "busy": False}``.
+    :param child_session_id: Id of that child, e.g. ``"conv_c1"``.
+    :param sub_agent_name: Declared sub-agent name, e.g. ``"reviewer"``.
+    :param session_name: Requested child title, e.g. ``"audit"``.
+    :param model: Requested per-dispatch model override, if any.
+    :param file_ids: Requested attachment ids.
+    :param cost_budget: Requested ``subagent_cost_budget`` params.
+    :returns: The error string to return to the caller, or ``None`` when
+        the dispatch may continue into this child.
+    """
+    from omnigent.runner import app as _runner_app
+
+    if model is not None:
+        # A native child bakes --model in at terminal launch, so a
+        # mid-conversation override would be silently ignored there.
+        return (
+            f"Error: sys_session_send 'model' applies only when a "
+            f"sub-agent session is first created; {sub_agent_name!r} "
+            f"title {session_name!r} already exists as "
+            f"{child_session_id}. Re-send without 'model' to continue "
+            "it, or sys_session_close it first to spawn a fresh "
+            "session on the requested model."
+        )
+    if file_ids:
+        return (
+            f"Error: sys_session_send 'file_ids' applies only when a "
+            f"sub-agent session is first created; {sub_agent_name!r} "
+            f"title {session_name!r} already exists as "
+            f"{child_session_id}. Re-send without 'file_ids' to "
+            "continue it, or sys_session_close it first to spawn a "
+            "fresh session with the requested files."
+        )
+    if cost_budget is not None:
+        return (
+            f"Error: sys_session_send 'cost_budget' applies only when a "
+            f"sub-agent session is first created; {sub_agent_name!r} "
+            f"title {session_name!r} already exists as "
+            f"{child_session_id}. Re-send without 'cost_budget' to "
+            "continue it, or sys_session_close it first to spawn a "
+            "fresh session with the requested budget."
+        )
+    existing_work = _runner_app.get_subagent_work(child_session_id)
+    if existing_work is not None and existing_work.status in (
+        "launching",
+        "running",
+        "waiting",
+    ):
+        return (
+            f"Error: sub-agent {sub_agent_name!r} title {session_name!r} "
+            "already has a launching or running turn. Use a distinct task-based title "
+            "for independent parallel work; reuse this title only to continue the same "
+            "conversation after completion."
+        )
+    if child.get("busy") is True:
+        return (
+            f"Error: sub-agent {sub_agent_name!r} title {session_name!r} "
+            "is already running. Use a distinct task-based title for independent "
+            "parallel work; reuse this title only to continue the same conversation "
+            "after completion."
+        )
+    return None
+
+
 async def _execute_subagent_tool(
     args: dict[str, Any],
     *,
@@ -1724,55 +1808,18 @@ async def _execute_subagent_tool(
         child_session_id = existing.get("id")
         if not isinstance(child_session_id, str) or not child_session_id:
             return "Error: existing child session is missing id"
-        if model is not None:
-            # A native child bakes --model in at terminal launch, so a
-            # mid-conversation override would be silently ignored there.
-            return (
-                f"Error: sys_session_send 'model' applies only when a "
-                f"sub-agent session is first created; {sub_agent_name!r} "
-                f"title {session_name!r} already exists as "
-                f"{child_session_id}. Re-send without 'model' to continue "
-                "it, or sys_session_close it first to spawn a fresh "
-                "session on the requested model."
-            )
-        if file_ids:
-            return (
-                f"Error: sys_session_send 'file_ids' applies only when a "
-                f"sub-agent session is first created; {sub_agent_name!r} "
-                f"title {session_name!r} already exists as "
-                f"{child_session_id}. Re-send without 'file_ids' to "
-                "continue it, or sys_session_close it first to spawn a "
-                "fresh session with the requested files."
-            )
-        if cost_budget is not None:
-            return (
-                f"Error: sys_session_send 'cost_budget' applies only when a "
-                f"sub-agent session is first created; {sub_agent_name!r} "
-                f"title {session_name!r} already exists as "
-                f"{child_session_id}. Re-send without 'cost_budget' to "
-                "continue it, or sys_session_close it first to spawn a "
-                "fresh session with the requested budget."
-            )
+        rejection = _existing_child_dispatch_error(
+            existing,
+            child_session_id,
+            sub_agent_name=str(sub_agent_name),
+            session_name=session_name,
+            model=model,
+            file_ids=file_ids,
+            cost_budget=cost_budget,
+        )
+        if rejection is not None:
+            return rejection
         child_wrapper_label = _session_wrapper_label(existing)
-        existing_work = _runner_app.get_subagent_work(child_session_id)
-        if existing_work is not None and existing_work.status in (
-            "launching",
-            "running",
-            "waiting",
-        ):
-            return (
-                f"Error: sub-agent {sub_agent_name!r} title {session_name!r} "
-                "already has a launching or running turn. Use a distinct task-based title "
-                "for independent parallel work; reuse this title only to continue the same "
-                "conversation after completion."
-            )
-        if existing.get("busy") is True:
-            return (
-                f"Error: sub-agent {sub_agent_name!r} title {session_name!r} "
-                "is already running. Use a distinct task-based title for independent "
-                "parallel work; reuse this title only to continue the same conversation "
-                "after completion."
-            )
     else:
         child_harness = _subagent_harness(str(sub_agent_name), agent_spec)
         # Apply an allowlisted per-dispatch harness override. The sub-agent
@@ -1878,12 +1925,9 @@ async def _execute_subagent_tool(
             )
         resp = await server_client.post("/v1/sessions", json=create_body, timeout=30.0)
         if resp.status_code == 409:
-            # The (parent, title) slot was taken between the lookup above
-            # and the insert — a sibling dispatch of the same fan-out won
-            # the race. Re-run the lookup and continue that child instead
-            # of failing the dispatch: creating is only ever a fallback
-            # for "no such child yet", so a conflict means the child the
-            # caller asked for now exists.
+            # The (parent, title) slot is taken: a sibling dispatch of the
+            # same fan-out won the insert. Continue that child instead of
+            # failing the dispatch.
             raced = await _find_existing_child_session(
                 server_client=server_client,
                 conversation_id=conversation_id,
@@ -1902,6 +1946,20 @@ async def _execute_subagent_tool(
             raced_id = raced.get("id")
             if not isinstance(raced_id, str) or not raced_id:
                 return "Error: existing child session is missing id"
+            # The child was created by someone else, so this dispatch's
+            # create-time options never landed and it may already be
+            # mid-turn: hold it to the same rules as a pre-existing child.
+            rejection = _existing_child_dispatch_error(
+                raced,
+                raced_id,
+                sub_agent_name=str(sub_agent_name),
+                session_name=session_name,
+                model=model,
+                file_ids=file_ids,
+                cost_budget=cost_budget,
+            )
+            if rejection is not None:
+                return rejection
             child_session_id = raced_id
             child_wrapper_label = _session_wrapper_label(raced)
         elif resp.status_code >= 400:

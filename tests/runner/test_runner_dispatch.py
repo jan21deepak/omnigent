@@ -2931,6 +2931,164 @@ async def test_sys_session_send_adopts_child_created_by_racing_dispatch(
 
 
 @pytest.mark.asyncio
+async def test_sys_session_send_refuses_to_adopt_busy_racing_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A 409 whose child is mid-turn is refused, not messaged.
+
+    The child that won the insert race is usually already launching its
+    own first turn. Delivering this dispatch's message into it would run
+    two overlapping turns on one sub-agent, so the adopted child gets the
+    same busy guard as one found by the pre-check.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    """
+    from omnigent.runner import app as runner_app
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    event_posts: list[dict[str, Any]] = []
+    listings = 0
+
+    monkeypatch.setattr(runner_app, "get_session_agent_id", lambda _sid: "ag_parent")
+    monkeypatch.setattr(runner_app, "register_child_session", lambda *a, **k: None)
+    session_inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal listings
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_parent_busy_race":
+            return httpx.Response(200, json={"labels": {}})
+        if (
+            request.method == "GET"
+            and request.url.path == "/v1/sessions/conv_parent_busy_race/child_sessions"
+        ):
+            listings += 1
+            if listings == 1:
+                return httpx.Response(200, json={"data": []})
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "conv_child_busy",
+                            "tool": "reviewer",
+                            "session_name": "audit",
+                            "busy": True,
+                        }
+                    ]
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            return httpx.Response(409, json={"error": {"code": "already_exists"}})
+        if request.method == "POST" and request.url.path == "/v1/sessions/conv_child_busy/events":
+            event_posts.append(json.loads(request.content))
+            return httpx.Response(202, json={"queued": True})
+        return httpx.Response(404, json={"error": str(request.url)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        try:
+            output = await execute_tool(
+                tool_name="sys_session_send",
+                arguments=json.dumps({"agent": "reviewer", "title": "audit", "args": "review"}),
+                server_client=server_client,
+                conversation_id="conv_parent_busy_race",
+                agent_spec=SimpleNamespace(sub_agents=[SimpleNamespace(name="reviewer")]),
+                session_inbox=session_inbox,
+            )
+        finally:
+            runner_app._session_inboxes_ref.pop("conv_parent_busy_race", None)
+
+    assert output.startswith("Error:")
+    assert "already running" in output
+    assert event_posts == [], "a busy child must not receive a second overlapping turn"
+
+
+@pytest.mark.asyncio
+async def test_sys_session_send_reports_dropped_cost_budget_on_raced_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A 409 with create-only options tells the caller they did not apply.
+
+    ``cost_budget`` is attached as a policy to the row this dispatch
+    tried to create. Adopting the winner's child instead would drop the
+    budget, so the sub-agent would run uncapped with nothing said — the
+    caller must be told to close the child or re-send without it.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    """
+    from omnigent.runner import app as runner_app
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    listings = 0
+    policy_posts = 0
+
+    monkeypatch.setattr(runner_app, "get_session_agent_id", lambda _sid: "ag_parent")
+    monkeypatch.setattr(runner_app, "register_child_session", lambda *a, **k: None)
+    session_inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal listings, policy_posts
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_parent_budget":
+            return httpx.Response(200, json={"labels": {}})
+        if (
+            request.method == "GET"
+            and request.url.path == "/v1/sessions/conv_parent_budget/child_sessions"
+        ):
+            listings += 1
+            if listings == 1:
+                return httpx.Response(200, json={"data": []})
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "conv_child_budget",
+                            "tool": "reviewer",
+                            "session_name": "audit",
+                            "busy": False,
+                        }
+                    ]
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            return httpx.Response(409, json={"error": {"code": "already_exists"}})
+        if request.url.path.endswith("/policies"):
+            policy_posts += 1
+            return httpx.Response(201, json={"ok": True})
+        return httpx.Response(404, json={"error": str(request.url)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        try:
+            output = await execute_tool(
+                tool_name="sys_session_send",
+                arguments=json.dumps(
+                    {
+                        "agent": "reviewer",
+                        "title": "audit",
+                        "args": {"input": "review", "cost_budget": {"max_cost_usd": 5}},
+                    }
+                ),
+                server_client=server_client,
+                conversation_id="conv_parent_budget",
+                agent_spec=SimpleNamespace(sub_agents=[SimpleNamespace(name="reviewer")]),
+                session_inbox=session_inbox,
+            )
+        finally:
+            runner_app._session_inboxes_ref.pop("conv_parent_budget", None)
+
+    assert output.startswith("Error:")
+    assert "cost_budget" in output
+    assert policy_posts == 0
+
+
+@pytest.mark.asyncio
 async def test_sys_session_send_reports_unlistable_title_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
