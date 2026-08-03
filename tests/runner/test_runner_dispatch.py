@@ -2849,6 +2849,141 @@ async def test_sys_session_send_reuses_existing_child_session(
 
 
 @pytest.mark.asyncio
+async def test_sys_session_send_adopts_child_created_by_racing_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A 409 from the child create continues the child that won the race.
+
+    Fan-out dispatches several sub-agents at once, so two sends for the
+    same ``(agent, title)`` can both pass the find-or-create pre-check
+    and only the first insert wins the ``(parent, title)`` slot. The
+    loser must adopt the winner's child instead of surfacing a create
+    failure — otherwise the orchestrator sees a dead sub-agent for work
+    that is actually running.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    """
+    from omnigent.runner import app as runner_app
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    event_posts: list[dict[str, Any]] = []
+    listings = 0
+
+    monkeypatch.setattr(runner_app, "get_session_agent_id", lambda _sid: "ag_parent")
+    monkeypatch.setattr(runner_app, "register_child_session", lambda *a, **k: None)
+    session_inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal listings
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_parent_race":
+            return httpx.Response(200, json={"labels": {}})
+        if (
+            request.method == "GET"
+            and request.url.path == "/v1/sessions/conv_parent_race/child_sessions"
+        ):
+            listings += 1
+            # First lookup: no child yet, so the dispatch tries to create.
+            # Second lookup (after the 409): the racing sibling's row.
+            if listings == 1:
+                return httpx.Response(200, json={"data": []})
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "conv_child_race",
+                            "tool": "reviewer",
+                            "session_name": "audit",
+                            "busy": False,
+                        }
+                    ]
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            return httpx.Response(409, json={"error": {"code": "already_exists"}})
+        if request.method == "POST" and request.url.path == "/v1/sessions/conv_child_race/events":
+            event_posts.append(json.loads(request.content))
+            return httpx.Response(202, json={"queued": True})
+        return httpx.Response(404, json={"error": str(request.url)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        try:
+            output = await execute_tool(
+                tool_name="sys_session_send",
+                arguments=json.dumps({"agent": "reviewer", "title": "audit", "args": "review"}),
+                server_client=server_client,
+                conversation_id="conv_parent_race",
+                agent_spec=SimpleNamespace(sub_agents=[SimpleNamespace(name="reviewer")]),
+                session_inbox=session_inbox,
+            )
+        finally:
+            runner_app.unregister_subagent_work("conv_child_race")
+            runner_app._session_inboxes_ref.pop("conv_parent_race", None)
+
+    payload = json.loads(output)
+    assert payload["conversation_id"] == "conv_child_race"
+    assert payload["status"] == "launching"
+    assert len(event_posts) == 1
+
+
+@pytest.mark.asyncio
+async def test_sys_session_send_reports_unlistable_title_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A 409 with no adoptable child yields an actionable retry instruction.
+
+    The slot can be held by a row the child listing hides (an archived
+    sibling). There is nothing to continue there, so the dispatch must
+    tell the orchestrator to pick another title rather than echo a bare
+    server error.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    """
+    from omnigent.runner import app as runner_app
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    monkeypatch.setattr(runner_app, "get_session_agent_id", lambda _sid: "ag_parent")
+    monkeypatch.setattr(runner_app, "register_child_session", lambda *a, **k: None)
+    session_inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_parent_hidden":
+            return httpx.Response(200, json={"labels": {}})
+        if (
+            request.method == "GET"
+            and request.url.path == "/v1/sessions/conv_parent_hidden/child_sessions"
+        ):
+            return httpx.Response(200, json={"data": []})
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            return httpx.Response(409, json={"error": {"code": "already_exists"}})
+        return httpx.Response(404, json={"error": str(request.url)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        try:
+            output = await execute_tool(
+                tool_name="sys_session_send",
+                arguments=json.dumps({"agent": "reviewer", "title": "audit", "args": "review"}),
+                server_client=server_client,
+                conversation_id="conv_parent_hidden",
+                agent_spec=SimpleNamespace(sub_agents=[SimpleNamespace(name="reviewer")]),
+                session_inbox=session_inbox,
+            )
+        finally:
+            runner_app._session_inboxes_ref.pop("conv_parent_hidden", None)
+
+    assert output.startswith("Error:")
+    assert "different title" in output
+
+
+@pytest.mark.asyncio
 async def test_sys_session_send_named_child_retries_without_rejected_actor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

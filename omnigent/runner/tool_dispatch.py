@@ -1877,44 +1877,73 @@ async def _execute_subagent_tool(
                 harness=child_harness,
             )
         resp = await server_client.post("/v1/sessions", json=create_body, timeout=30.0)
-        if resp.status_code >= 400:
+        if resp.status_code == 409:
+            # The (parent, title) slot was taken between the lookup above
+            # and the insert — a sibling dispatch of the same fan-out won
+            # the race. Re-run the lookup and continue that child instead
+            # of failing the dispatch: creating is only ever a fallback
+            # for "no such child yet", so a conflict means the child the
+            # caller asked for now exists.
+            raced = await _find_existing_child_session(
+                server_client=server_client,
+                conversation_id=conversation_id,
+                agent=str(sub_agent_name),
+                title=session_name,
+            )
+            if isinstance(raced, str):
+                return raced
+            if raced is None:
+                return (
+                    f"Error: sub-agent {sub_agent_name!r} title {session_name!r} "
+                    "is already taken by a child session that is no longer "
+                    "listed (closed or archived). Dispatch the same sub-agent "
+                    "under a different title."
+                )
+            raced_id = raced.get("id")
+            if not isinstance(raced_id, str) or not raced_id:
+                return "Error: existing child session is missing id"
+            child_session_id = raced_id
+            child_wrapper_label = _session_wrapper_label(raced)
+        elif resp.status_code >= 400:
             return f"Error: failed to create child session: {resp.status_code} {resp.text[:200]}"
-        child_data = resp.json()
-        child_session_id = child_data.get("session_id") or child_data.get("id")
-        if not child_session_id:
-            return "Error: server did not return child session_id"
-        child_wrapper_label = _session_wrapper_label(child_data)
-        created_child = True
+        else:
+            child_data = resp.json()
+            child_session_id = child_data.get("session_id") or child_data.get("id")
+            if not child_session_id:
+                return "Error: server did not return child session_id"
+            child_wrapper_label = _session_wrapper_label(child_data)
+            created_child = True
 
-        # Attach a subagent_cost_budget policy to the child when requested.
-        # Non-fatal: the child session is still usable without the budget.
-        if cost_budget is not None:
-            policy_body = {
-                "name": "__subagent_cost_budget",
-                "type": "python",
-                "handler": "omnigent.policies.builtins.cost.subagent_cost_budget",
-                "factory_params": cost_budget,  # Dict with max_cost_usd and/or ask_thresholds_usd
-                "enabled": True,
-            }
-            try:
-                pol_resp = await server_client.post(
-                    f"/v1/sessions/{child_session_id}/policies",
-                    json=policy_body,
-                    timeout=10.0,
-                )
-                if pol_resp.status_code >= 400:
-                    _logger.warning(
-                        "failed to set subagent_cost_budget policy on child %s: %s %s",
-                        child_session_id,
-                        pol_resp.status_code,
-                        pol_resp.text[:200],
+            # Attach a subagent_cost_budget policy to the child when requested.
+            # Non-fatal: the child session is still usable without the budget.
+            if cost_budget is not None:
+                policy_body = {
+                    "name": "__subagent_cost_budget",
+                    "type": "python",
+                    "handler": "omnigent.policies.builtins.cost.subagent_cost_budget",
+                    # Dict with max_cost_usd and/or ask_thresholds_usd
+                    "factory_params": cost_budget,
+                    "enabled": True,
+                }
+                try:
+                    pol_resp = await server_client.post(
+                        f"/v1/sessions/{child_session_id}/policies",
+                        json=policy_body,
+                        timeout=10.0,
                     )
-            except httpx.HTTPError:
-                _logger.warning(
-                    "failed to set subagent_cost_budget policy on child %s",
-                    child_session_id,
-                    exc_info=True,
-                )
+                    if pol_resp.status_code >= 400:
+                        _logger.warning(
+                            "failed to set subagent_cost_budget policy on child %s: %s %s",
+                            child_session_id,
+                            pol_resp.status_code,
+                            pol_resp.text[:200],
+                        )
+                except httpx.HTTPError:
+                    _logger.warning(
+                        "failed to set subagent_cost_budget policy on child %s",
+                        child_session_id,
+                        exc_info=True,
+                    )
 
     # Publish session.created on the parent's SSE stream so the
     # REPL debug panel and any client subscribers discover the

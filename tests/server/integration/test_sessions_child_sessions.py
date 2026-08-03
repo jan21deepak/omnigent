@@ -1357,6 +1357,45 @@ async def test_native_subagent_yolo_args_reject_overlong_spec_value(
     assert "invalid terminal_launch_args in sub-agent spec" in error["message"]
 
 
+async def test_subagent_create_title_collision_is_409_not_internal_error(
+    client: httpx.AsyncClient,
+) -> None:
+    """
+    A taken child title fails as ``already_exists``, never a 500.
+
+    ``create_conversation`` enforces per-parent title uniqueness with a
+    plain ``NameAlreadyExistsError``. That is not an ``OmnigentError``,
+    so it used to escape ``POST /v1/sessions`` as an opaque ``500
+    internal_error`` — an orchestrator fanning children out could only
+    read that as "the server is broken", and re-dispatching hit the same
+    wall until the parent gave up. The collision is caller-fixable, so
+    it must come back as a 409 naming the session already holding the
+    title.
+    """
+    parent = await _create_parent_with_subagents(
+        client,
+        name="orch-duplicate-child-title",
+        sub_agents=[{"name": "impl", "harness": "claude-native"}],
+    )
+    body = {
+        "agent_id": parent["agent_id"],
+        "parent_session_id": parent["session_id"],
+        "title": "impl:task",
+        "sub_agent_name": "impl",
+    }
+    first = await client.post("/v1/sessions", json=body)
+    assert first.status_code == 201, first.text
+
+    second = await client.post("/v1/sessions", json=body)
+    assert second.status_code == 409, second.text
+    error = second.json()["error"]
+    assert error["code"] == "already_exists"
+    # The id of the child holding the slot is what lets the caller
+    # continue (or close) it instead of guessing a new title.
+    assert first.json()["id"] in error["message"]
+    assert "impl:task" in error["message"]
+
+
 async def test_subagent_create_rejects_undeclared_name(
     client: httpx.AsyncClient,
 ) -> None:
