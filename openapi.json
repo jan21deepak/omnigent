@@ -1189,6 +1189,53 @@
         "title": "CreateProjectRequest",
         "type": "object"
       },
+      "CreateProjectResourceRequest": {
+        "additionalProperties": false,
+        "description": "Request body for `POST /v1/projects/{project_id}/resources`.",
+        "properties": {
+          "details": {
+            "additionalProperties": true,
+            "description": "Optional opaque JSON object (note body, branch, port, \u2026).",
+            "title": "Details",
+            "type": "object"
+          },
+          "name": {
+            "description": "Human-readable label. Trimmed; non-empty, at most 200 chars.",
+            "title": "Name",
+            "type": "string"
+          },
+          "type": {
+            "description": "Resource kind (`link`, `repository`, `document`, `service` or `note`).",
+            "enum": [
+              "link",
+              "repository",
+              "document",
+              "service",
+              "note"
+            ],
+            "title": "Type",
+            "type": "string"
+          },
+          "uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional location of the resource, at most 2048 characters.",
+            "title": "Uri"
+          }
+        },
+        "required": [
+          "type",
+          "name"
+        ],
+        "title": "CreateProjectResourceRequest",
+        "type": "object"
+      },
       "CreateSessionPolicyRequest": {
         "description": "Request body for `POST /v1/sessions/{session_id}/policies`.",
         "properties": {
@@ -6391,6 +6438,51 @@
         "title": "UpdateProjectRequest",
         "type": "object"
       },
+      "UpdateProjectResourceRequest": {
+        "additionalProperties": false,
+        "description": "Request body for `PATCH /v1/projects/{project_id}/resources/{id}`.\n\nAll fields optional; `None` leaves a field unchanged. `type` is\nimmutable \u2014 replace the resource instead of retyping it.",
+        "properties": {
+          "details": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "New details object replacing the stored one. `None` leaves it unchanged; `{}` clears it.",
+            "title": "Details"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "New label. `None` leaves it unchanged.",
+            "title": "Name"
+          },
+          "uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "New location. `None` leaves it unchanged; `\"\"` clears it.",
+            "title": "Uri"
+          }
+        },
+        "title": "UpdateProjectResourceRequest",
+        "type": "object"
+      },
       "UpdateSessionPolicyRequest": {
         "additionalProperties": false,
         "description": "Request body for `PATCH /v1/sessions/{session_id}/policies/{policy_id}`.\n\nAll fields are optional; `None` fields are left unchanged.\nUnknown fields (including `type`, which is immutable) are\nrejected with `422`.",
@@ -8293,6 +8385,280 @@
           }
         },
         "summary": "Update Project",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/v1/projects/{project_id}/resources": {
+      "get": {
+        "description": "List a project's resources, oldest first.\n\n**Returns:** `{\"object\": \"list\", \"data\": [...]}`.\n\n**Raises**\n\n- `OmnigentError` \u2014 401 if unauthenticated, 404 if the project is not found / not owned by the caller.",
+        "operationId": "list_project_resources_v1_projects__project_id__resources_get",
+        "parameters": [
+          {
+            "description": "The project whose resources to list.",
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Project Resources V1 Projects  Project Id  Resources Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Project Resources",
+        "tags": [
+          "projects"
+        ]
+      },
+      "post": {
+        "description": "Attach a non-agent resource (link, repo, service, note) to a project.\n\n**Parameters**\n\n- `body` \u2014 Resource payload (type, name, uri, details).\n\n**Returns:** The created resource as a serialized dict.\n\n**Raises**\n\n- `OmnigentError` \u2014 401 if unauthenticated, 404 if the project is not found / not owned by the caller.",
+        "operationId": "add_project_resource_v1_projects__project_id__resources_post",
+        "parameters": [
+          {
+            "description": "The project to attach the resource to.",
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProjectResourceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Add Project Resource V1 Projects  Project Id  Resources Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Project Resource",
+        "tags": [
+          "projects"
+        ]
+      }
+    },
+    "/v1/projects/{project_id}/resources/{resource_id}": {
+      "delete": {
+        "description": "Detach a resource from the caller's project.\n\n**Returns:** `{\"id\": ..., \"object\": \"project.resource.deleted\", \"deleted\": True}`.\n\n**Raises**\n\n- `OmnigentError` \u2014 401 if unauthenticated, 404 if the resource or its project is not found / not owned by the caller.",
+        "operationId": "delete_project_resource_v1_projects__project_id__resources__resource_id__delete",
+        "parameters": [
+          {
+            "description": "The project the resource belongs to.",
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The resource to remove.",
+            "in": "path",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "title": "Resource Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Delete Project Resource V1 Projects  Project Id  Resources  Resource Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Project Resource",
+        "tags": [
+          "projects"
+        ]
+      },
+      "get": {
+        "description": "Return one resource of the caller's project.\n\n**Returns:** The resource as a serialized dict.\n\n**Raises**\n\n- `OmnigentError` \u2014 401 if unauthenticated, 404 if the resource or its project is not found / not owned by the caller.",
+        "operationId": "get_project_resource_v1_projects__project_id__resources__resource_id__get",
+        "parameters": [
+          {
+            "description": "The project the resource belongs to.",
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The resource to fetch.",
+            "in": "path",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "title": "Resource Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Project Resource V1 Projects  Project Id  Resources  Resource Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Project Resource",
+        "tags": [
+          "projects"
+        ]
+      },
+      "patch": {
+        "description": "Update a resource's label, location, or details.\n\n**Parameters**\n\n- `body` \u2014 Fields to change; `None` fields are left unchanged.\n\n**Returns:** The updated resource as a serialized dict.\n\n**Raises**\n\n- `OmnigentError` \u2014 401 if unauthenticated, 404 if the resource or its project is not found / not owned by the caller.",
+        "operationId": "update_project_resource_v1_projects__project_id__resources__resource_id__patch",
+        "parameters": [
+          {
+            "description": "The project the resource belongs to.",
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The resource to update.",
+            "in": "path",
+            "name": "resource_id",
+            "required": true,
+            "schema": {
+              "title": "Resource Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProjectResourceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Project Resource V1 Projects  Project Id  Resources  Resource Id  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Project Resource",
         "tags": [
           "projects"
         ]

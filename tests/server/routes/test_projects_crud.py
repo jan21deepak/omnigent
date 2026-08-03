@@ -340,3 +340,190 @@ async def test_cannot_delete_another_users_project(
     assert (
         await multi_user_client.get(f"/v1/projects/{created['id']}", headers=_as_user(BOB))
     ).status_code == 200
+
+
+# ── Project resources (non-agent workspace tabs) ───────────────────────
+
+
+async def _make_project(client: httpx.AsyncClient, name: str) -> str:
+    """Create a project and return its id."""
+    resp = await client.post("/v1/projects", json={"name": name})
+    assert resp.status_code == 200
+    project_id: str = resp.json()["id"]
+    return project_id
+
+
+async def test_add_resource(project_client: httpx.AsyncClient) -> None:
+    """POST attaches a resource and echoes it back."""
+    project_id = await _make_project(project_client, "Feature X")
+    resp = await project_client.post(
+        f"/v1/projects/{project_id}/resources",
+        json={
+            "type": "link",
+            "name": "  Tracking issue  ",
+            "uri": "https://github.com/o/r/issues/3",
+            "details": {"tab": "github"},
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["object"] == "project.resource"
+    assert body["project_id"] == project_id
+    assert body["type"] == "link"
+    assert body["name"] == "Tracking issue"
+    assert body["uri"] == "https://github.com/o/r/issues/3"
+    assert body["details"] == {"tab": "github"}
+    assert body["updated_at"] is None
+
+
+async def test_add_resource_rejects_unknown_type(project_client: httpx.AsyncClient) -> None:
+    """An unknown resource type is a 422 from the request schema."""
+    project_id = await _make_project(project_client, "P")
+    resp = await project_client.post(
+        f"/v1/projects/{project_id}/resources", json={"type": "spaceship", "name": "Bad"}
+    )
+    assert resp.status_code == 422
+
+
+async def test_add_resource_unknown_project_404(project_client: httpx.AsyncClient) -> None:
+    """Attaching to a project that doesn't exist returns 404."""
+    resp = await project_client.post(
+        f"/v1/projects/{'0' * 32}/resources", json={"type": "note", "name": "Orphan"}
+    )
+    assert resp.status_code == 404
+
+
+async def test_list_resources(project_client: httpx.AsyncClient) -> None:
+    """GET lists the project's resources."""
+    project_id = await _make_project(project_client, "P")
+    for name in ("First", "Second"):
+        await project_client.post(
+            f"/v1/projects/{project_id}/resources", json={"type": "note", "name": name}
+        )
+    resp = await project_client.get(f"/v1/projects/{project_id}/resources")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["object"] == "list"
+    assert {r["name"] for r in body["data"]} == {"First", "Second"}
+
+
+async def test_get_and_update_resource(project_client: httpx.AsyncClient) -> None:
+    """A resource can be fetched and patched; type stays put."""
+    project_id = await _make_project(project_client, "P")
+    created = (
+        await project_client.post(
+            f"/v1/projects/{project_id}/resources",
+            json={"type": "service", "name": "Dev server", "uri": "http://localhost:3000"},
+        )
+    ).json()
+
+    fetched = await project_client.get(f"/v1/projects/{project_id}/resources/{created['id']}")
+    assert fetched.status_code == 200
+    assert fetched.json()["name"] == "Dev server"
+
+    patched = await project_client.patch(
+        f"/v1/projects/{project_id}/resources/{created['id']}",
+        json={"name": "Dev server (vite)", "uri": "http://localhost:5173"},
+    )
+    assert patched.status_code == 200
+    body = patched.json()
+    assert body["name"] == "Dev server (vite)"
+    assert body["uri"] == "http://localhost:5173"
+    assert body["type"] == "service"
+    assert body["updated_at"] is not None
+
+
+async def test_update_resource_rejects_type_change(project_client: httpx.AsyncClient) -> None:
+    """``type`` is not a patchable field."""
+    project_id = await _make_project(project_client, "P")
+    created = (
+        await project_client.post(
+            f"/v1/projects/{project_id}/resources", json={"type": "note", "name": "N"}
+        )
+    ).json()
+    resp = await project_client.patch(
+        f"/v1/projects/{project_id}/resources/{created['id']}", json={"type": "link"}
+    )
+    assert resp.status_code == 422
+
+
+async def test_resource_not_reachable_through_other_project(
+    project_client: httpx.AsyncClient,
+) -> None:
+    """A resource is only addressable under the project that owns it."""
+    owning = await _make_project(project_client, "Owning")
+    other = await _make_project(project_client, "Other")
+    created = (
+        await project_client.post(
+            f"/v1/projects/{owning}/resources", json={"type": "note", "name": "N"}
+        )
+    ).json()
+    resp = await project_client.get(f"/v1/projects/{other}/resources/{created['id']}")
+    assert resp.status_code == 404
+
+
+async def test_delete_resource(project_client: httpx.AsyncClient) -> None:
+    """DELETE detaches the resource; a second delete 404s."""
+    project_id = await _make_project(project_client, "P")
+    created = (
+        await project_client.post(
+            f"/v1/projects/{project_id}/resources", json={"type": "note", "name": "Doomed"}
+        )
+    ).json()
+    resp = await project_client.delete(f"/v1/projects/{project_id}/resources/{created['id']}")
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] is True
+    again = await project_client.delete(f"/v1/projects/{project_id}/resources/{created['id']}")
+    assert again.status_code == 404
+
+
+async def test_deleting_project_drops_its_resources(project_client: httpx.AsyncClient) -> None:
+    """A project's resources go away with the project."""
+    project_id = await _make_project(project_client, "Doomed")
+    await project_client.post(
+        f"/v1/projects/{project_id}/resources", json={"type": "note", "name": "N"}
+    )
+    await project_client.delete(f"/v1/projects/{project_id}")
+    resp = await project_client.get(f"/v1/projects/{project_id}/resources")
+    assert resp.status_code == 404
+
+
+async def test_resources_are_owner_private(multi_user_client: httpx.AsyncClient) -> None:
+    """Alice can neither read nor mutate the resources of Bob's project."""
+    created = (
+        await multi_user_client.post(
+            "/v1/projects", json={"name": "Bob only"}, headers=_as_user(BOB)
+        )
+    ).json()
+    resource = (
+        await multi_user_client.post(
+            f"/v1/projects/{created['id']}/resources",
+            json={"type": "link", "name": "Bob's link", "uri": "https://example.com"},
+            headers=_as_user(BOB),
+        )
+    ).json()
+
+    assert (
+        await multi_user_client.get(
+            f"/v1/projects/{created['id']}/resources", headers=_as_user(ALICE)
+        )
+    ).status_code == 404
+    assert (
+        await multi_user_client.patch(
+            f"/v1/projects/{created['id']}/resources/{resource['id']}",
+            json={"name": "Hacked"},
+            headers=_as_user(ALICE),
+        )
+    ).status_code == 404
+    assert (
+        await multi_user_client.delete(
+            f"/v1/projects/{created['id']}/resources/{resource['id']}",
+            headers=_as_user(ALICE),
+        )
+    ).status_code == 404
+    still = (
+        await multi_user_client.get(
+            f"/v1/projects/{created['id']}/resources/{resource['id']}", headers=_as_user(BOB)
+        )
+    ).json()
+    assert still["name"] == "Bob's link"

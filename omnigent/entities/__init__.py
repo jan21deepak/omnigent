@@ -29,6 +29,11 @@ from omnigent.entities.pagination import PagedList
 from omnigent.entities.permission import ResolvedAccess, SessionPermission
 from omnigent.entities.policy import Policy
 from omnigent.entities.project import Project
+from omnigent.entities.project_resource import (
+    PROJECT_RESOURCE_TYPES,
+    ProjectResource,
+    ProjectResourceType,
+)
 from omnigent.entities.scheduled_task import ScheduledTask, ScheduledTaskRun
 from omnigent.entities.session_resources import (
     DEFAULT_ENVIRONMENT_ID,
@@ -41,6 +46,7 @@ from omnigent.entities.session_resources import (
 __all__ = [
     "DEFAULT_ENVIRONMENT_ID",
     "NON_CONTENT_ITEM_TYPES",
+    "PROJECT_RESOURCE_TYPES",
     "Account",
     "AccountToken",
     "Agent",
@@ -61,6 +67,8 @@ __all__ = [
     "PagedList",
     "Policy",
     "Project",
+    "ProjectResource",
+    "ProjectResourceType",
     "ReasoningData",
     "ResolvedAccess",
     "ResourceEventData",
