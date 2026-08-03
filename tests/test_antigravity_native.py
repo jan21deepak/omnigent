@@ -938,6 +938,11 @@ def _seed_bridge_state(bridge_dir: Path, conversation_id: str) -> None:
     )
 
 
+async def _skip_model_readiness(*_args: object, **_kwargs: object) -> bool:
+    """Stub the cold-start model-readiness gate so tests don't poll a fake port."""
+    return True
+
+
 async def test_cli_cold_start_mints_without_patching_external_session_id(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -957,6 +962,7 @@ async def test_cli_cold_start_mints_without_patching_external_session_id(
     _seed_bridge_state(bridge_dir, "agy_conv_placeholder")
 
     monkeypatch.setattr(_mod, "resolve_cold_start_agy_rpc_port", lambda _sock, _tgt: 52548)
+    monkeypatch.setattr(_mod, "_await_agy_model_readiness", _skip_model_readiness)
     started: list[tuple[int, str]] = []
     monkeypatch.setattr(_mod, "start_cascade", lambda port, cid: started.append((port, cid)))
 
@@ -1061,6 +1067,7 @@ async def test_cli_cold_start_scopes_to_pane_agy(
         lambda _sock, _tgt: rpc.PaneAgyResolution(agy_found=True, port=61000),
     )
     monkeypatch.setattr(rpc, "_candidate_agy_rpc_ports", lambda: [52548, 61000])
+    monkeypatch.setattr(_mod, "_await_agy_model_readiness", _skip_model_readiness)
     started: list[tuple[int, str]] = []
     monkeypatch.setattr(_mod, "start_cascade", lambda port, cid: started.append((port, cid)))
 
@@ -1111,6 +1118,7 @@ async def test_cli_cold_start_falls_back_when_no_pane(
 
     monkeypatch.setattr(rpc, "resolve_pane_agy_rpc_port_state", _no_pane_scope)
     monkeypatch.setattr(rpc, "_candidate_agy_rpc_ports", lambda: [52548, 61000])
+    monkeypatch.setattr(_mod, "_await_agy_model_readiness", _skip_model_readiness)
     started: list[tuple[int, str]] = []
     monkeypatch.setattr(_mod, "start_cascade", lambda port, cid: started.append((port, cid)))
 
@@ -1220,6 +1228,7 @@ async def test_cli_cold_start_falls_back_when_port_unattributable(
         lambda _sock, _tgt: rpc.PaneAgyResolution(agy_found=True, port=None),
     )
     monkeypatch.setattr(rpc, "_candidate_agy_rpc_ports", lambda: [52548])
+    monkeypatch.setattr(_mod, "_await_agy_model_readiness", _skip_model_readiness)
     started: list[tuple[int, str]] = []
     monkeypatch.setattr(_mod, "start_cascade", lambda port, cid: started.append((port, cid)))
 
@@ -1246,3 +1255,142 @@ async def test_cli_cold_start_falls_back_when_port_unattributable(
 
     assert len(started) == 1
     assert started[0][0] == 52548  # safe candidate fallback (agy is up in the pane)
+
+
+# ---------------------------------------------------------------------------
+# _await_agy_model_readiness — wait for a non-empty model catalog + stabilize
+# ---------------------------------------------------------------------------
+
+
+async def test_model_readiness_waits_for_non_empty_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The gate polls ``GetAvailableModels`` until ``models`` is non-empty, then
+    stabilizes before returning ``True``.
+
+    A fresh agy binds its RPC port before model init finishes, so the first polls
+    return an empty catalog; the gate must keep polling and only clear once agy
+    reports models — then wait the stabilization interval.
+    """
+    import omnigent.antigravity_native_rpc as rpc
+
+    catalogs = [{}, {"models": {}}, {"models": {"m": {"model": "x"}}}]
+    calls: list[int] = []
+
+    def _fake_get_models(port: int) -> dict[str, object]:
+        calls.append(port)
+        return catalogs[min(len(calls) - 1, len(catalogs) - 1)]
+
+    monkeypatch.setattr(rpc, "get_available_models", _fake_get_models)
+
+    sleeps: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(_mod, "_agy_cold_start_poll_sleep", _record_sleep)
+
+    ready = await _mod._await_agy_model_readiness(
+        52548,
+        "conv_cs",
+        timeout_s=5.0,
+        poll_interval_s=0.25,
+        stabilize_s=4.0,
+    )
+
+    assert ready is True
+    # Polled until the third (non-empty) catalog.
+    assert calls == [52548, 52548, 52548]
+    # Two poll backoffs between the three probes, then the stabilization wait last.
+    assert sleeps == [0.25, 0.25, 4.0]
+
+
+async def test_model_readiness_times_out_but_allows_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    When the catalog never fills, the gate returns ``False`` (best-effort) so the
+    caller still attempts ``StartCascade`` rather than abandoning the launch.
+    """
+    import omnigent.antigravity_native_rpc as rpc
+
+    def _always_empty(_port: int) -> dict[str, object]:
+        return {"models": {}}
+
+    monkeypatch.setattr(rpc, "get_available_models", _always_empty)
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(_mod, "_agy_cold_start_poll_sleep", _no_sleep)
+
+    ready = await _mod._await_agy_model_readiness(52548, "conv_cs", timeout_s=0.0, stabilize_s=0.0)
+    assert ready is False
+
+
+async def test_model_readiness_retries_on_poll_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A transport/JSON error from ``GetAvailableModels`` is treated as not-ready and
+    retried, not propagated (agy may be briefly unreachable right after binding).
+    """
+    import omnigent.antigravity_native_rpc as rpc
+
+    calls: list[int] = []
+
+    def _flaky(_port: int) -> dict[str, object]:
+        calls.append(_port)
+        if len(calls) == 1:
+            raise httpx.ConnectError("connection refused")
+        return {"models": {"m": {"model": "x"}}}
+
+    monkeypatch.setattr(rpc, "get_available_models", _flaky)
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(_mod, "_agy_cold_start_poll_sleep", _no_sleep)
+
+    ready = await _mod._await_agy_model_readiness(52548, "conv_cs", timeout_s=5.0, stabilize_s=0.0)
+    assert ready is True
+    assert len(calls) == 2  # errored once, retried, then saw models
+
+
+async def test_cli_cold_start_awaits_model_readiness_before_start_cascade(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    The cold-start gates ``StartCascade`` on the model-readiness wait.
+
+    A freshly authenticated agy answers RPC before model init completes, so the
+    bound port is not sufficient readiness. The cold-start must call
+    ``_await_agy_model_readiness`` (with the resolved port) BEFORE ``StartCascade``.
+    """
+    monkeypatch.setattr(bridge_mod, "_BRIDGE_ROOT", tmp_path / "antigravity-native")
+    bridge_dir = bridge_mod.bridge_dir_for_bridge_id("bridge_cs_gate")
+    _seed_bridge_state(bridge_dir, "agy_conv_placeholder")
+
+    monkeypatch.setattr(_mod, "resolve_cold_start_agy_rpc_port", lambda _sock, _tgt: 52548)
+
+    order: list[str] = []
+
+    async def _spy_readiness(port: int, _session_id: str, **_kwargs: object) -> bool:
+        order.append(f"readiness:{port}")
+        return True
+
+    monkeypatch.setattr(_mod, "_await_agy_model_readiness", _spy_readiness)
+    monkeypatch.setattr(
+        _mod, "start_cascade", lambda port, _cid: order.append(f"start_cascade:{port}")
+    )
+
+    await _mod._cold_start_agy_conversation(
+        bridge_dir,
+        "conv_cs",
+        base_url="http://test",
+        headers={},
+        timeout_s=1.0,
+    )
+
+    assert order == ["readiness:52548", "start_cascade:52548"]
