@@ -5571,14 +5571,10 @@ async def _create_session_from_existing_agent(
             terminal_launch_args=validated_launch_args,
         )
     except Exception as exc:
-        # Broad catch is intentional: ANY create_conversation failure
-        # (integrity error, name clash, ...) must trigger orphan-worktree
-        # cleanup before the error propagates. Nothing is swallowed: it is
-        # re-raised below, translated where it has a status code. Gate on
-        # created_worktree_path, NOT git_branch: only a worktree Omnigent
-        # created here may be force-removed. An existing worktree bound
-        # via workspace_branch also sets git_branch but is the user's —
-        # never destroy it.
+        # ANY create_conversation failure must clean up an orphan worktree
+        # before it propagates (re-raised below, translated where it has a
+        # status code). Only a worktree created here may be force-removed:
+        # one bound via workspace_branch sets git_branch but is the user's.
         if (
             created_worktree_path is not None
             and body.host_id is not None

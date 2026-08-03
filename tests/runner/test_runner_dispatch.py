@@ -3089,6 +3089,88 @@ async def test_sys_session_send_reports_dropped_cost_budget_on_raced_child(
 
 
 @pytest.mark.asyncio
+async def test_sys_session_send_reports_dropped_harness_on_existing_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A ``harness`` for an already-existing child is refused, not dropped.
+
+    The harness picks the child's terminal binary at launch and only ever
+    travels in the create body, so continuing an existing child would run
+    the sub-agent on whatever harness that child was created with. That
+    silently contradicts the caller, who is told instead — matching what
+    by-session-id dispatch already does.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    """
+    from omnigent.runner import app as runner_app
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    creates = 0
+    event_posts: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(runner_app, "get_session_agent_id", lambda _sid: "ag_parent")
+    monkeypatch.setattr(runner_app, "register_child_session", lambda *a, **k: None)
+    session_inbox: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    async def _server_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal creates
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_parent_harness":
+            return httpx.Response(200, json={"labels": {}})
+        if (
+            request.method == "GET"
+            and request.url.path == "/v1/sessions/conv_parent_harness/child_sessions"
+        ):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "conv_child_harness",
+                            "tool": "reviewer",
+                            "session_name": "audit",
+                            "busy": False,
+                        }
+                    ]
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            creates += 1
+            return httpx.Response(201, json={"id": "conv_child_harness"})
+        if request.method == "POST" and request.url.path.endswith("/events"):
+            event_posts.append(json.loads(request.content))
+            return httpx.Response(202, json={"queued": True})
+        return httpx.Response(404, json={"error": str(request.url)})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_server_handler),
+        base_url="http://server",
+    ) as server_client:
+        try:
+            output = await execute_tool(
+                tool_name="sys_session_send",
+                arguments=json.dumps(
+                    {
+                        "agent": "reviewer",
+                        "title": "audit",
+                        "args": {"input": "review", "harness": "codex-native"},
+                    }
+                ),
+                server_client=server_client,
+                conversation_id="conv_parent_harness",
+                agent_spec=SimpleNamespace(sub_agents=[SimpleNamespace(name="reviewer")]),
+                session_inbox=session_inbox,
+            )
+        finally:
+            runner_app._session_inboxes_ref.pop("conv_parent_harness", None)
+
+    assert output.startswith("Error:")
+    assert "'harness' applies only when a sub-agent session is first created" in output
+    assert creates == 0
+    assert event_posts == []
+
+
+@pytest.mark.asyncio
 async def test_sys_session_send_reports_unlistable_title_conflict(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

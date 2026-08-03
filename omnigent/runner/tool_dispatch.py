@@ -1561,16 +1561,18 @@ def _existing_child_dispatch_error(
     model: str | None,
     file_ids: list[str],
     cost_budget: _JsonObject | None,
+    harness_override: str | None,
 ) -> str | None:
     """
     Reject a dispatch that cannot be applied to an already-live child.
 
-    ``model``, ``file_ids`` and ``cost_budget`` are all baked in at child
-    creation (native harnesses take ``--model`` at terminal launch, the
-    budget is a policy attached to the fresh row), so on a child that
-    already exists they would be silently dropped — the caller must be
-    told instead. A child mid-turn is likewise refused: a second message
-    would interleave two turns on one sub-agent.
+    ``model``, ``file_ids``, ``cost_budget`` and ``harness`` are all baked
+    in at child creation (native harnesses take ``--model`` and their
+    binary at terminal launch, the budget is a policy attached to the
+    fresh row), so on a child that already exists they would be silently
+    dropped — the caller must be told instead. A child mid-turn is
+    likewise refused: a second message would interleave two turns on one
+    sub-agent.
 
     :param child: Child-session listing row, e.g.
         ``{"id": "conv_c1", "busy": False}``.
@@ -1580,6 +1582,7 @@ def _existing_child_dispatch_error(
     :param model: Requested per-dispatch model override, if any.
     :param file_ids: Requested attachment ids.
     :param cost_budget: Requested ``subagent_cost_budget`` params.
+    :param harness_override: Requested per-dispatch harness, if any.
     :returns: The error string to return to the caller, or ``None`` when
         the dispatch may continue into this child.
     """
@@ -1613,6 +1616,16 @@ def _existing_child_dispatch_error(
             f"{child_session_id}. Re-send without 'cost_budget' to "
             "continue it, or sys_session_close it first to spawn a "
             "fresh session with the requested budget."
+        )
+    if harness_override is not None:
+        # The harness is the child's terminal/binary, chosen at launch.
+        return (
+            f"Error: sys_session_send 'harness' applies only when a "
+            f"sub-agent session is first created; {sub_agent_name!r} "
+            f"title {session_name!r} already exists as "
+            f"{child_session_id}. Re-send without 'harness' to continue "
+            "it, or sys_session_close it first to spawn a fresh "
+            "session on the requested harness."
         )
     existing_work = _runner_app.get_subagent_work(child_session_id)
     if existing_work is not None and existing_work.status in (
@@ -1816,6 +1829,7 @@ async def _execute_subagent_tool(
             model=model,
             file_ids=file_ids,
             cost_budget=cost_budget,
+            harness_override=harness_override,
         )
         if rejection is not None:
             return rejection
@@ -1957,6 +1971,7 @@ async def _execute_subagent_tool(
                 model=model,
                 file_ids=file_ids,
                 cost_budget=cost_budget,
+                harness_override=harness_override,
             )
             if rejection is not None:
                 return rejection
