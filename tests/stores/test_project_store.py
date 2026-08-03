@@ -353,3 +353,158 @@ def test_delete_scoped_to_owner(store: SqlAlchemyProjectStore) -> None:
     deleted = store.delete(_uid("p1"), owner_user_id="bob@example.com")
     assert deleted is False
     assert store.get(_uid("p1"), owner_user_id="alice@example.com") is not None
+
+
+# ── resources ──────────────────────────────────────────────────────────────
+
+ALICE = "alice@example.com"
+BOB = "bob@example.com"
+
+
+def test_add_resource_returns_resource(store: SqlAlchemyProjectStore) -> None:
+    """``add_resource`` echoes the fields back and stamps ``created_at``."""
+    store.create(_uid("p1"), "P", ALICE)
+    resource = store.add_resource(
+        _uid("p1"),
+        _uid("r1"),
+        owner_user_id=ALICE,
+        type="link",
+        name="Design doc",
+        uri="https://example.com/doc",
+        details={"tab": "docs"},
+    )
+    assert resource is not None
+    assert resource.project_id == _uid("p1")
+    assert resource.type == "link"
+    assert resource.name == "Design doc"
+    assert resource.uri == "https://example.com/doc"
+    assert resource.details == {"tab": "docs"}
+    assert resource.created_at > 0
+    assert resource.updated_at is None
+
+
+def test_add_resource_missing_project_returns_none(store: SqlAlchemyProjectStore) -> None:
+    """Attaching to an unknown project returns ``None``."""
+    assert (
+        store.add_resource(
+            _uid("nope"), _uid("r1"), owner_user_id=ALICE, type="note", name="Orphan"
+        )
+        is None
+    )
+
+
+def test_add_resource_scoped_to_owner(store: SqlAlchemyProjectStore) -> None:
+    """A non-owner cannot attach resources to another user's project."""
+    store.create(_uid("p1"), "P", ALICE)
+    assert (
+        store.add_resource(_uid("p1"), _uid("r1"), owner_user_id=BOB, type="note", name="Nope")
+        is None
+    )
+
+
+def test_add_resource_rejects_unknown_type(store: SqlAlchemyProjectStore) -> None:
+    """An unknown resource type is rejected."""
+    store.create(_uid("p1"), "P", ALICE)
+    with pytest.raises(OmnigentError) as exc:
+        store.add_resource(
+            _uid("p1"),
+            _uid("r1"),
+            owner_user_id=ALICE,
+            type="spaceship",  # type: ignore[arg-type]
+            name="Bad",
+        )
+    assert exc.value.code == ErrorCode.INVALID_INPUT
+
+
+def test_list_resources_scoped_to_project(store: SqlAlchemyProjectStore) -> None:
+    """A project's resources exclude other projects' resources."""
+    store.create(_uid("p1"), "P1", ALICE)
+    store.create(_uid("p2"), "P2", ALICE)
+    store.add_resource(_uid("p1"), _uid("r1"), owner_user_id=ALICE, type="link", name="A")
+    store.add_resource(_uid("p1"), _uid("r2"), owner_user_id=ALICE, type="note", name="B")
+    store.add_resource(_uid("p2"), _uid("r3"), owner_user_id=ALICE, type="note", name="Other")
+
+    resources = store.list_resources(_uid("p1"), owner_user_id=ALICE)
+    assert resources is not None
+    assert {r.name for r in resources} == {"A", "B"}
+    # Stable server order: created_at then id.
+    assert [(r.created_at, r.id) for r in resources] == sorted(
+        (r.created_at, r.id) for r in resources
+    )
+
+
+def test_list_resources_missing_project_returns_none(store: SqlAlchemyProjectStore) -> None:
+    """Listing an unknown (or unowned) project's resources returns ``None``."""
+    store.create(_uid("p1"), "P", ALICE)
+    assert store.list_resources(_uid("nope"), owner_user_id=ALICE) is None
+    assert store.list_resources(_uid("p1"), owner_user_id=BOB) is None
+
+
+def test_get_resource_requires_matching_project(store: SqlAlchemyProjectStore) -> None:
+    """A resource is only reachable through the project that owns it."""
+    store.create(_uid("p1"), "P1", ALICE)
+    store.create(_uid("p2"), "P2", ALICE)
+    store.add_resource(_uid("p1"), _uid("r1"), owner_user_id=ALICE, type="note", name="A")
+    assert store.get_resource(_uid("p1"), _uid("r1"), owner_user_id=ALICE) is not None
+    assert store.get_resource(_uid("p2"), _uid("r1"), owner_user_id=ALICE) is None
+    assert store.get_resource(_uid("p1"), _uid("r1"), owner_user_id=BOB) is None
+
+
+def test_update_resource_changes_fields(store: SqlAlchemyProjectStore) -> None:
+    """``update_resource`` writes the provided fields and stamps ``updated_at``."""
+    store.create(_uid("p1"), "P", ALICE)
+    store.add_resource(
+        _uid("p1"), _uid("r1"), owner_user_id=ALICE, type="service", name="API", uri="http://old"
+    )
+    updated = store.update_resource(
+        _uid("p1"), _uid("r1"), owner_user_id=ALICE, name="API v2", uri="http://new"
+    )
+    assert updated is not None
+    assert updated.name == "API v2"
+    assert updated.uri == "http://new"
+    assert updated.updated_at is not None
+
+
+def test_update_resource_empty_uri_clears_it(store: SqlAlchemyProjectStore) -> None:
+    """An empty ``uri`` clears the stored location; ``None`` leaves it alone."""
+    store.create(_uid("p1"), "P", ALICE)
+    store.add_resource(
+        _uid("p1"), _uid("r1"), owner_user_id=ALICE, type="link", name="L", uri="http://keep"
+    )
+    unchanged = store.update_resource(_uid("p1"), _uid("r1"), owner_user_id=ALICE, name="L2")
+    assert unchanged is not None
+    assert unchanged.uri == "http://keep"
+    cleared = store.update_resource(_uid("p1"), _uid("r1"), owner_user_id=ALICE, uri="")
+    assert cleared is not None
+    assert cleared.uri is None
+
+
+def test_update_resource_scoped_to_owner(store: SqlAlchemyProjectStore) -> None:
+    """A non-owner cannot update another user's resource."""
+    store.create(_uid("p1"), "P", ALICE)
+    store.add_resource(_uid("p1"), _uid("r1"), owner_user_id=ALICE, type="note", name="Mine")
+    assert store.update_resource(_uid("p1"), _uid("r1"), owner_user_id=BOB, name="Yours") is None
+
+
+def test_delete_resource_removes_it(store: SqlAlchemyProjectStore) -> None:
+    """``delete_resource`` removes the row and is idempotent."""
+    store.create(_uid("p1"), "P", ALICE)
+    store.add_resource(_uid("p1"), _uid("r1"), owner_user_id=ALICE, type="note", name="Doomed")
+    assert store.delete_resource(_uid("p1"), _uid("r1"), owner_user_id=ALICE) is True
+    assert store.get_resource(_uid("p1"), _uid("r1"), owner_user_id=ALICE) is None
+    assert store.delete_resource(_uid("p1"), _uid("r1"), owner_user_id=ALICE) is False
+
+
+def test_delete_project_deletes_its_resources(store: SqlAlchemyProjectStore) -> None:
+    """Deleting a project takes its resources with it, leaving others alone."""
+    store.create(_uid("p1"), "P1", ALICE)
+    store.create(_uid("p2"), "P2", ALICE)
+    store.add_resource(_uid("p1"), _uid("r1"), owner_user_id=ALICE, type="note", name="Gone")
+    store.add_resource(_uid("p2"), _uid("r2"), owner_user_id=ALICE, type="note", name="Kept")
+
+    store.delete(_uid("p1"), owner_user_id=ALICE)
+    store.create(_uid("p3"), "P1 again", ALICE)
+    assert store.list_resources(_uid("p3"), owner_user_id=ALICE) == []
+    remaining = store.list_resources(_uid("p2"), owner_user_id=ALICE)
+    assert remaining is not None
+    assert [r.name for r in remaining] == ["Kept"]

@@ -6,6 +6,10 @@ projects, list them, rename them, and delete them. Session membership
 (filing a session into a project) is managed on the sessions API via the
 conversation store's ``project_id``.
 
+The nested ``/projects/{id}/resources`` endpoints attach the non-agent half of
+a workspace — links, repositories, local services and notes — so everything
+behind one objective lives in one place instead of scattered browser tabs.
+
 Because projects are owner-private and carry no ACL of their own, every handler
 scopes to the requesting user: a caller only ever sees and mutates their own
 projects. In single-user mode (no auth provider) the owner is ``None`` and all
@@ -20,13 +24,15 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
-from omnigent.entities import Project
+from omnigent.entities import Project, ProjectResource
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.auth import AuthProvider
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.schemas import (
     CreateProjectRequest,
+    CreateProjectResourceRequest,
     UpdateProjectRequest,
+    UpdateProjectResourceRequest,
 )
 from omnigent.stores.project_store import ProjectStore
 
@@ -44,6 +50,25 @@ def _to_response(project: Project) -> dict[str, Any]:
         "created_at": project.created_at,
         "updated_at": project.updated_at,
         "config": project.config,
+    }
+
+
+def _resource_to_response(resource: ProjectResource) -> dict[str, Any]:
+    """Convert a :class:`ProjectResource` to a ``ProjectResourceObject`` dict.
+
+    :param resource: The entity to convert.
+    :returns: Dict matching the :class:`ProjectResourceObject` shape.
+    """
+    return {
+        "id": resource.id,
+        "object": "project.resource",
+        "project_id": resource.project_id,
+        "type": resource.type,
+        "name": resource.name,
+        "uri": resource.uri,
+        "details": resource.details,
+        "created_at": resource.created_at,
+        "updated_at": resource.updated_at,
     }
 
 
@@ -157,5 +182,127 @@ def create_projects_router(
         if not deleted:
             raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
         return {"id": project_id, "object": "project.deleted", "deleted": True}
+
+    @router.post("/projects/{project_id}/resources")
+    async def add_project_resource(
+        request: Request,
+        project_id: str,
+        body: CreateProjectResourceRequest,
+    ) -> dict[str, Any]:
+        """Attach a non-agent resource (link, repo, service, note) to a project.
+
+        :param request: The incoming request, used to identify the user.
+        :param project_id: The project to attach the resource to.
+        :param body: Resource payload (type, name, uri, details).
+        :returns: The created resource as a serialized dict.
+        :raises OmnigentError: 401 if unauthenticated, 404 if the project is
+            not found / not owned by the caller.
+        """
+        user_id = require_user(request, auth_provider)
+        resource = await asyncio.to_thread(
+            project_store.add_resource,
+            project_id,
+            uuid.uuid4().hex,
+            owner_user_id=user_id,
+            type=body.type,
+            name=body.name,
+            uri=body.uri,
+            details=body.details,
+        )
+        if resource is None:
+            raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
+        return _resource_to_response(resource)
+
+    @router.get("/projects/{project_id}/resources")
+    async def list_project_resources(request: Request, project_id: str) -> dict[str, Any]:
+        """List a project's resources, oldest first.
+
+        :param request: The incoming request, used to identify the user.
+        :param project_id: The project whose resources to list.
+        :returns: ``{"object": "list", "data": [...]}``.
+        :raises OmnigentError: 401 if unauthenticated, 404 if the project is
+            not found / not owned by the caller.
+        """
+        user_id = require_user(request, auth_provider)
+        resources = await asyncio.to_thread(
+            project_store.list_resources, project_id, owner_user_id=user_id
+        )
+        if resources is None:
+            raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
+        return {"object": "list", "data": [_resource_to_response(r) for r in resources]}
+
+    @router.get("/projects/{project_id}/resources/{resource_id}")
+    async def get_project_resource(
+        request: Request, project_id: str, resource_id: str
+    ) -> dict[str, Any]:
+        """Return one resource of the caller's project.
+
+        :param request: The incoming request, used to identify the user.
+        :param project_id: The project the resource belongs to.
+        :param resource_id: The resource to fetch.
+        :returns: The resource as a serialized dict.
+        :raises OmnigentError: 401 if unauthenticated, 404 if the resource or
+            its project is not found / not owned by the caller.
+        """
+        user_id = require_user(request, auth_provider)
+        resource = await asyncio.to_thread(
+            project_store.get_resource, project_id, resource_id, owner_user_id=user_id
+        )
+        if resource is None:
+            raise OmnigentError("Project resource not found", code=ErrorCode.NOT_FOUND)
+        return _resource_to_response(resource)
+
+    @router.patch("/projects/{project_id}/resources/{resource_id}")
+    async def update_project_resource(
+        request: Request,
+        project_id: str,
+        resource_id: str,
+        body: UpdateProjectResourceRequest,
+    ) -> dict[str, Any]:
+        """Update a resource's label, location, or details.
+
+        :param request: The incoming request, used to identify the user.
+        :param project_id: The project the resource belongs to.
+        :param resource_id: The resource to update.
+        :param body: Fields to change; ``None`` fields are left unchanged.
+        :returns: The updated resource as a serialized dict.
+        :raises OmnigentError: 401 if unauthenticated, 404 if the resource or
+            its project is not found / not owned by the caller.
+        """
+        user_id = require_user(request, auth_provider)
+        resource = await asyncio.to_thread(
+            project_store.update_resource,
+            project_id,
+            resource_id,
+            owner_user_id=user_id,
+            name=body.name,
+            uri=body.uri,
+            details=body.details,
+        )
+        if resource is None:
+            raise OmnigentError("Project resource not found", code=ErrorCode.NOT_FOUND)
+        return _resource_to_response(resource)
+
+    @router.delete("/projects/{project_id}/resources/{resource_id}")
+    async def delete_project_resource(
+        request: Request, project_id: str, resource_id: str
+    ) -> dict[str, Any]:
+        """Detach a resource from the caller's project.
+
+        :param request: The incoming request, used to identify the user.
+        :param project_id: The project the resource belongs to.
+        :param resource_id: The resource to remove.
+        :returns: ``{"id": ..., "object": "project.resource.deleted",
+            "deleted": True}``.
+        :raises OmnigentError: 401 if unauthenticated, 404 if the resource or
+            its project is not found / not owned by the caller.
+        """
+        user_id = require_user(request, auth_provider)
+        deleted = await asyncio.to_thread(
+            project_store.delete_resource, project_id, resource_id, owner_user_id=user_id
+        )
+        if not deleted:
+            raise OmnigentError("Project resource not found", code=ErrorCode.NOT_FOUND)
+        return {"id": resource_id, "object": "project.resource.deleted", "deleted": True}
 
     return router

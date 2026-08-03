@@ -16,7 +16,7 @@ from typing import Annotated, Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, Strict, field_validator, model_validator
 
-from omnigent.entities import ConversationItem
+from omnigent.entities import ConversationItem, ProjectResourceType
 
 # ── Shared ──────────────────────────────────────────────────────
 
@@ -4282,6 +4282,158 @@ class ProjectList(BaseModel):
 
     object: Literal["list"] = "list"
     data: list[ProjectObject]
+
+
+def _validate_resource_name(value: str) -> str:
+    """Trim a project-resource name and bound it at 200 characters.
+
+    :param value: The raw name.
+    :returns: The trimmed name.
+    :raises ValueError: If empty/whitespace-only or over 200 characters.
+    """
+    trimmed = value.strip()
+    if not trimmed:
+        raise ValueError("name must not be empty")
+    if len(trimmed) > 200:
+        raise ValueError("name must be at most 200 characters")
+    return trimmed
+
+
+def _validate_resource_uri(value: str | None) -> str | None:
+    """Trim a project-resource uri and bound it at the column width.
+
+    :param value: The raw uri, or ``None``.
+    :returns: The trimmed uri, or ``None``.
+    :raises ValueError: If longer than 2048 characters.
+    """
+    if value is None:
+        return None
+    trimmed = value.strip()
+    if len(trimmed) > 2048:
+        raise ValueError("uri must be at most 2048 characters")
+    return trimmed
+
+
+class ProjectResourceObject(BaseModel):
+    """
+    A non-agent resource attached to a project.
+
+    :param id: Resource id (bare 32-char hex).
+    :param object: Discriminator; always ``"project.resource"``.
+    :param project_id: Owning project's id.
+    :param type: Resource kind (``link``, ``repository``, ``document``,
+        ``service`` or ``note``).
+    :param name: Human-readable label.
+    :param uri: Location of the resource (URL, repo path/clone URL,
+        ``http://localhost:3000``, …), or ``None`` when it has none.
+    :param details: Opaque client-owned JSON object; empty when unset.
+    :param created_at: Unix epoch seconds at creation.
+    :param updated_at: Unix epoch seconds of the last write, or ``None``.
+    """
+
+    id: str
+    object: Literal["project.resource"] = "project.resource"
+    project_id: str
+    type: ProjectResourceType
+    name: str
+    uri: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+    created_at: int
+    updated_at: int | None = None
+
+
+class ProjectResourceList(BaseModel):
+    """Response for ``GET /v1/projects/{project_id}/resources``.
+
+    :param object: Discriminator; always ``"list"``.
+    :param data: The project's resources, oldest first.
+    """
+
+    object: Literal["list"] = "list"
+    data: list[ProjectResourceObject]
+
+
+class CreateProjectResourceRequest(BaseModel):
+    """
+    Request body for ``POST /v1/projects/{project_id}/resources``.
+
+    :param type: Resource kind (``link``, ``repository``, ``document``,
+        ``service`` or ``note``).
+    :param name: Human-readable label. Trimmed; non-empty, at most 200 chars.
+    :param uri: Optional location of the resource, at most 2048 characters.
+    :param details: Optional opaque JSON object (note body, branch, port, …).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: ProjectResourceType
+    name: str
+    uri: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str) -> str:
+        """Trim and bound the resource name.
+
+        :param value: The raw name from the request.
+        :returns: The trimmed name.
+        :raises ValueError: If empty/whitespace-only or over 200 chars.
+        """
+        return _validate_resource_name(value)
+
+    @field_validator("uri")
+    @classmethod
+    def _validate_uri(cls, value: str | None) -> str | None:
+        """Trim and bound the resource uri when provided.
+
+        :param value: The raw uri from the request, or ``None``.
+        :returns: The trimmed uri, or ``None``.
+        :raises ValueError: If provided but longer than 2048 characters.
+        """
+        return _validate_resource_uri(value)
+
+
+class UpdateProjectResourceRequest(BaseModel):
+    """
+    Request body for ``PATCH /v1/projects/{project_id}/resources/{id}``.
+
+    All fields optional; ``None`` leaves a field unchanged. ``type`` is
+    immutable — replace the resource instead of retyping it.
+
+    :param name: New label. ``None`` leaves it unchanged.
+    :param uri: New location. ``None`` leaves it unchanged; ``""`` clears it.
+    :param details: New details object replacing the stored one. ``None``
+        leaves it unchanged; ``{}`` clears it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    uri: str | None = None
+    details: dict[str, Any] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name(cls, value: str | None) -> str | None:
+        """Trim and bound the resource name when provided.
+
+        :param value: The raw name from the request, or ``None``.
+        :returns: The trimmed name, or ``None``.
+        :raises ValueError: If provided but empty/whitespace-only or over 200.
+        """
+        return None if value is None else _validate_resource_name(value)
+
+    @field_validator("uri")
+    @classmethod
+    def _validate_uri(cls, value: str | None) -> str | None:
+        """Trim and bound the resource uri when provided.
+
+        :param value: The raw uri from the request, or ``None``.
+        :returns: The trimmed uri, or ``None``.
+        :raises ValueError: If provided but longer than 2048 characters.
+        """
+        return _validate_resource_uri(value)
 
 
 class SessionProjectSummary(BaseModel):

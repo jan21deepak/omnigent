@@ -742,6 +742,60 @@ class SqlProject(OmnigentBase):
     )
 
 
+class SqlProjectResource(OmnigentBase):
+    """
+    SQLAlchemy model for the ``project_resources`` table.
+
+    A non-agent artifact attached to a project — a link, a repository, a local
+    service, or a note. Agent sessions attach to a project through
+    ``omnigent_conversation_metadata.project_id``; resources cover the rest of
+    the workspace. There is no DB foreign key to ``projects`` (Rule R032):
+    ownership is checked in the store, which also deletes a project's resources
+    with the project.
+
+    :param id: Uuid16 primary key (bare 32-char hex in Python).
+    :param project_id: Owning project's id.
+    :param type: Resource kind (``link``/``repository``/``document``/
+        ``service``/``note``); validated in the store, not by the DB.
+    :param name: Human-readable label.
+    :param uri: Location of the resource, or NULL when it has none (notes).
+    :param details: Opaque client-owned JSON object, or NULL when empty.
+    :param created_at: Unix epoch seconds at row creation.
+    :param updated_at: Unix epoch seconds of the last write, or ``None``.
+    """
+
+    __tablename__ = "project_resources"
+
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    project_id: Mapped[str] = mapped_column(Uuid16(), nullable=False)
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    uri: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        # "list a project's resources" — created_at in the key so the
+        # ORDER BY created_at, id is served by the index (no filesort).
+        Index(
+            "ix_project_resources_project_id",
+            "workspace_id",
+            "project_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+
 class SqlConversation(ConversationBase):
     """
     SQLAlchemy model for the ``conversations`` table.

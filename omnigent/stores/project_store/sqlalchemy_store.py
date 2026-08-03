@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
-from sqlalchemy import asc, select
+from sqlalchemy import asc, delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from omnigent.db.db_models import SqlProject, current_workspace_id
+from omnigent.db.db_models import SqlProject, SqlProjectResource, current_workspace_id
 from omnigent.db.utils import (
     get_or_create_engine,
     make_managed_session_maker,
     now_epoch,
 )
-from omnigent.entities import Project
+from omnigent.entities import (
+    PROJECT_RESOURCE_TYPES,
+    Project,
+    ProjectResource,
+    ProjectResourceType,
+)
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.stores.project_store import ProjectStore
 
@@ -25,6 +30,9 @@ from omnigent.stores.project_store import ProjectStore
 # above any realistic set of default-session hints (a few short keys) while
 # still capping abuse.
 _CONFIG_MAX_SERIALIZED_LEN = 64 * 1024
+
+# Same reasoning, applied to a resource's opaque ``details`` object.
+_DETAILS_MAX_SERIALIZED_LEN = 64 * 1024
 
 
 def _encode_config(config: dict[str, Any] | None) -> str | None:
@@ -94,6 +102,46 @@ def _to_entity(row: SqlProject) -> Project:
         created_at=row.created_at,
         updated_at=row.updated_at,
         config=_decode_config(row.config),
+    )
+
+
+def _encode_details(details: dict[str, Any] | None) -> str | None:
+    """Pack a resource's details dict into a compact JSON blob for storage.
+
+    :param details: The details object, or ``None``.
+    :returns: Compact JSON object string, or ``None`` when empty.
+    :raises OmnigentError: ``INVALID_INPUT`` if the serialized blob exceeds
+        :data:`_DETAILS_MAX_SERIALIZED_LEN`.
+    """
+    if not details:
+        return None
+    blob = json.dumps(details, separators=(",", ":"))
+    if len(blob) > _DETAILS_MAX_SERIALIZED_LEN:
+        raise OmnigentError(
+            f"resource details too large ({len(blob)} bytes; max {_DETAILS_MAX_SERIALIZED_LEN})",
+            code=ErrorCode.INVALID_INPUT,
+        )
+    return blob
+
+
+def _resource_to_entity(row: SqlProjectResource) -> ProjectResource:
+    """
+    Convert a :class:`SqlProjectResource` ORM row to a :class:`ProjectResource`.
+
+    :param row: The SQLAlchemy ORM row to convert.
+    :returns: A :class:`ProjectResource` dataclass instance.
+    """
+    return ProjectResource(
+        id=row.id,
+        project_id=row.project_id,
+        # The column is a plain string; the store is the only writer and
+        # validates the vocabulary on the way in.
+        type=cast(ProjectResourceType, row.type),
+        name=row.name,
+        uri=row.uri,
+        details=_decode_config(row.details),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 
@@ -262,10 +310,155 @@ class SqlAlchemyProjectStore(ProjectStore):
             return _to_entity(row)
 
     def delete(self, project_id: str, *, owner_user_id: str | None) -> bool:
-        """Delete an owned project. Idempotent; returns ``False`` if not found."""
+        """Delete an owned project and its resources. Idempotent."""
         with self._session() as session:
             row = session.get(SqlProject, (current_workspace_id(), project_id))
             if row is None or row.owner_user_id != owner_user_id:
+                return False
+            session.execute(
+                delete(SqlProjectResource).where(
+                    SqlProjectResource.workspace_id == current_workspace_id(),
+                    SqlProjectResource.project_id == project_id,
+                )
+            )
+            session.delete(row)
+            return True
+
+    # ── Resources ─────────────────────────────────────────────────────────
+
+    def _owns_project(self, session: Session, project_id: str, owner_user_id: str | None) -> bool:
+        """Return whether ``owner_user_id`` owns an existing project.
+
+        :param session: The active SQLAlchemy session.
+        :param project_id: The project to check.
+        :param owner_user_id: The requesting owner.
+        :returns: ``True`` when the project exists and is owned by the caller.
+        """
+        row = session.get(SqlProject, (current_workspace_id(), project_id))
+        return row is not None and row.owner_user_id == owner_user_id
+
+    def _owned_resource(
+        self,
+        session: Session,
+        project_id: str,
+        resource_id: str,
+        owner_user_id: str | None,
+    ) -> SqlProjectResource | None:
+        """Return the resource row when the caller owns its project.
+
+        :param session: The active SQLAlchemy session.
+        :param project_id: The project the resource must belong to.
+        :param resource_id: The resource to load.
+        :param owner_user_id: The requesting owner.
+        :returns: The ORM row, or ``None`` when missing / not owned.
+        """
+        if not self._owns_project(session, project_id, owner_user_id):
+            return None
+        row = session.get(SqlProjectResource, (current_workspace_id(), resource_id))
+        if row is None or row.project_id != project_id:
+            return None
+        return row
+
+    def add_resource(
+        self,
+        project_id: str,
+        resource_id: str,
+        *,
+        owner_user_id: str | None,
+        type: ProjectResourceType,
+        name: str,
+        uri: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> ProjectResource | None:
+        """Attach a non-agent resource to an owned project."""
+        if type not in PROJECT_RESOURCE_TYPES:
+            raise OmnigentError(
+                f"Unknown resource type {type!r}",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        with self._session() as session:
+            if not self._owns_project(session, project_id, owner_user_id):
+                return None
+            row = SqlProjectResource(
+                id=resource_id,
+                project_id=project_id,
+                type=type,
+                name=name,
+                uri=uri or None,
+                details=_encode_details(details),
+                created_at=now_epoch(),
+                updated_at=None,
+            )
+            session.add(row)
+            session.flush()
+            return _resource_to_entity(row)
+
+    def list_resources(
+        self, project_id: str, *, owner_user_id: str | None
+    ) -> list[ProjectResource] | None:
+        """List an owned project's resources ordered by ``created_at, id``."""
+        with self._session() as session:
+            if not self._owns_project(session, project_id, owner_user_id):
+                return None
+            stmt = (
+                select(SqlProjectResource)
+                .where(SqlProjectResource.workspace_id == current_workspace_id())
+                .where(SqlProjectResource.project_id == project_id)
+                .order_by(asc(SqlProjectResource.created_at), asc(SqlProjectResource.id))
+            )
+            rows = session.execute(stmt).scalars().all()
+            return [_resource_to_entity(r) for r in rows]
+
+    def get_resource(
+        self, project_id: str, resource_id: str, *, owner_user_id: str | None
+    ) -> ProjectResource | None:
+        """Return one resource of an owned project, or ``None`` if not found."""
+        with self._session() as session:
+            row = self._owned_resource(session, project_id, resource_id, owner_user_id)
+            return None if row is None else _resource_to_entity(row)
+
+    def update_resource(
+        self,
+        project_id: str,
+        resource_id: str,
+        *,
+        owner_user_id: str | None,
+        name: str | None = None,
+        uri: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> ProjectResource | None:
+        """Update mutable fields of a resource. ``None`` leaves a field alone."""
+        with self._session() as session:
+            row = self._owned_resource(session, project_id, resource_id, owner_user_id)
+            if row is None:
+                return None
+            changed = False
+            if name is not None and row.name != name:
+                row.name = name
+                changed = True
+            if uri is not None:
+                # "" clears the stored location; None means "leave unchanged".
+                new_uri = uri or None
+                if row.uri != new_uri:
+                    row.uri = new_uri
+                    changed = True
+            if details is not None:
+                encoded = _encode_details(details)
+                if row.details != encoded:
+                    row.details = encoded
+                    changed = True
+            if changed:
+                row.updated_at = now_epoch()
+            session.flush()
+            return _resource_to_entity(row)
+
+    def delete_resource(
+        self, project_id: str, resource_id: str, *, owner_user_id: str | None
+    ) -> bool:
+        """Detach a resource from an owned project. Idempotent."""
+        with self._session() as session:
+            row = self._owned_resource(session, project_id, resource_id, owner_user_id)
+            if row is None:
                 return False
             session.delete(row)
             return True
