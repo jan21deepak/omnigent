@@ -2717,6 +2717,62 @@ def _find_subagent_child_by_title(
         after = page.last_id
 
 
+async def _translated_child_create_error(
+    exc: BaseException,
+    *,
+    conversation_store: ConversationStore,
+    parent_id: str | None,
+    title: str | None,
+) -> BaseException:
+    """
+    Map a ``create_conversation`` store failure onto a client-facing error.
+
+    ``ConversationStore.create_conversation`` signals two caller-fixable
+    states with plain store exceptions: the ``(parent_conversation_id,
+    title)`` unique index firing (:class:`NameAlreadyExistsError`) and the
+    parent row disappearing between authorization and insert
+    (:class:`ConversationNotFoundError`). Neither is an
+    :class:`OmnigentError`, so both used to escape ``POST /v1/sessions``
+    as an opaque ``500 internal_error`` — fatal for sub-agent fan-out,
+    where an orchestrator dispatching several children sees only an
+    unexplained server error and gives up. Translating them into a 409 /
+    404 with the colliding title (and the id of the child already holding
+    it, when it can be resolved) lets the caller continue or close that
+    child instead of re-dispatching into the same wall.
+
+    :param exc: Exception raised by ``create_conversation``.
+    :param conversation_store: Store used to resolve the colliding child.
+    :param parent_id: Parent conversation id for a child create, e.g.
+        ``"conv_parent987"``; ``None`` for a top-level create.
+    :param title: Requested session title, e.g. ``"reviewer:auth"``.
+    :returns: The :class:`OmnigentError` to raise, or *exc* unchanged when
+        the failure has no client-facing translation.
+    """
+    if isinstance(exc, NameAlreadyExistsError):
+        existing_id: str | None = None
+        if parent_id is not None and title:
+            existing = await asyncio.to_thread(
+                _find_subagent_child_by_title,
+                conversation_store,
+                parent_id,
+                title,
+            )
+            existing_id = existing.id if existing is not None else None
+        held_by = f" (held by session {existing_id!r})" if existing_id else ""
+        return OmnigentError(
+            f"A session titled {title!r} already exists under parent "
+            f"{parent_id!r}{held_by}. Continue that session, or close it "
+            "and retry with a different title.",
+            code=ErrorCode.ALREADY_EXISTS,
+        )
+    if isinstance(exc, ConversationNotFoundError):
+        return OmnigentError(
+            f"Parent session {parent_id!r} no longer exists",
+            code=ErrorCode.NOT_FOUND,
+        )
+    return exc
+
+
 def _publish_session_created(
     parent_id: str,
     child_session_id: str,
@@ -8828,6 +8884,7 @@ __all__ = [
     "_subagent_delivery_status",
     "_targeted_elicitation_event",
     "_title_content_from_item",
+    "_translated_child_create_error",
     "_truncate_label",
     "_usage_by_model_for_display",
     "_utc_day",

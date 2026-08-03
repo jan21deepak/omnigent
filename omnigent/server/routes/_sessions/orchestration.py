@@ -5570,14 +5570,16 @@ async def _create_session_from_existing_agent(
             git_branch=git_branch,
             terminal_launch_args=validated_launch_args,
         )
-    except Exception:
+    except Exception as exc:
         # Broad catch is intentional: ANY create_conversation failure
         # (integrity error, name clash, ...) must trigger orphan-worktree
-        # cleanup before the error propagates. We re-raise unchanged
-        # below, so nothing is swallowed. Gate on created_worktree_path,
-        # NOT git_branch: only a worktree Omnigent created here may be
-        # force-removed. An existing worktree bound via workspace_branch
-        # also sets git_branch but is the user's — never destroy it.
+        # cleanup before the error propagates. Nothing is swallowed —
+        # store errors are either re-raised unchanged or translated into
+        # an ``OmnigentError`` carrying a real status code below. Gate on
+        # created_worktree_path, NOT git_branch: only a worktree Omnigent
+        # created here may be force-removed. An existing worktree bound
+        # via workspace_branch also sets git_branch but is the user's —
+        # never destroy it.
         if (
             created_worktree_path is not None
             and body.host_id is not None
@@ -5591,7 +5593,13 @@ async def _create_session_from_existing_agent(
                 request=request,
                 reason="create-rollback",
             )
-        raise
+        translated = await _translated_child_create_error(
+            exc,
+            conversation_store=conversation_store,
+            parent_id=body.parent_session_id,
+            title=body.title,
+        )
+        raise translated from exc
 
     # The create request has no conv id in its URL, so the path-based
     # FastAPI hook can't tag it — stamp the minted id so the create span
