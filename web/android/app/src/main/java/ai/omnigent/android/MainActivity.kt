@@ -310,9 +310,10 @@ class MainActivity : AppCompatActivity() {
             elevation = 6 * dp
         }
         (switchButton.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
-            // Initial position below the status bar; corrected by the insets
-            // listener once system bar insets are measured.
-            lp.topMargin = (8 * dp).toInt()
+            // Keep the pill below the status bar using the last measured top
+            // inset (0 before the first inset dispatch); the insets listener
+            // still corrects it on the next dispatch.
+            lp.topMargin = (lastInsets?.top ?: 0) + (8 * dp).toInt()
             switchButton.layoutParams = lp
         }
     }
@@ -577,8 +578,10 @@ class MainActivity : AppCompatActivity() {
      * sideways would re-cover the web chrome beside the pill.
      */
     private fun expandSwitchButtonTouchTarget(container: FrameLayout) {
-        val minHeight = (MIN_TAP_TARGET_DP * resources.displayMetrics.density).toInt()
         switchButton.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            // Read density at layout time so the target tracks a runtime
+            // Display-size change rather than the onCreate-time scale.
+            val minHeight = (MIN_TAP_TARGET_DP * resources.displayMetrics.density).toInt()
             val hitRect = Rect()
             switchButton.getHitRect(hitRect)
             if (hitRect.height() < minHeight) hitRect.bottom = hitRect.top + minHeight
