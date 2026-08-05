@@ -363,7 +363,24 @@ function createBrowserViewRegistry({
   };
 }
 
+/**
+ * Clear overlay suppression when the host renderer does a real document
+ * navigation (reload / server switch): its ref count is module state and dies
+ * with the page, so outstanding leases are never released. In-place (SPA route)
+ * navigations keep their leases, so they must not clear it.
+ *
+ * @param {{ on: (event: string, handler: Function) => void }} hostWebContents
+ * @param {{ setOverlaySuppressed: (suppressed: boolean) => unknown }} registry
+ */
+function resetOverlaySuppressionOnNavigation(hostWebContents, registry) {
+  if (!hostWebContents || typeof hostWebContents.on !== "function") return;
+  hostWebContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) registry.setOverlaySuppressed(false);
+  });
+}
+
 module.exports = {
   createBrowserViewRegistry,
+  resetOverlaySuppressionOnNavigation,
   DEFAULT_CAP,
 };

@@ -12,7 +12,10 @@
 const { describe, it, beforeEach } = require("node:test");
 const assert = require("node:assert/strict");
 
-const { createBrowserViewRegistry } = require("../src/browserViewRegistry");
+const {
+  createBrowserViewRegistry,
+  resetOverlaySuppressionOnNavigation,
+} = require("../src/browserViewRegistry");
 const { createBrowserViewBoundsController } = require("../src/browserViewBounds");
 
 /** Build a registry with spy-backed injected deps. Returns the registry plus
@@ -378,5 +381,48 @@ describe("browserViewRegistry — overlay suppression", () => {
     assert.equal(ctx.detached.length, 0);
     ctx.registry.setOverlaySuppressed(false);
     assert.equal(ctx.attached.length, 0);
+  });
+});
+
+describe("resetOverlaySuppressionOnNavigation", () => {
+  /** Stub webContents that captures the did-start-navigation handler. */
+  function makeHost() {
+    let handler = null;
+    return {
+      on: (event, fn) => {
+        if (event === "did-start-navigation") handler = fn;
+      },
+      navigate: (isInPlace, isMainFrame) => handler({}, "https://x/", isInPlace, isMainFrame),
+    };
+  }
+
+  function suppressedRegistry() {
+    const ctx = makeRegistry();
+    ctx.registry.openOrNavigate("conv_1", "https://example.com");
+    ctx.registry.setActive("conv_1");
+    ctx.registry.setOverlaySuppressed(true);
+    return ctx;
+  }
+
+  it("clears suppression on a main-frame document navigation (reload / server switch)", () => {
+    const ctx = suppressedRegistry();
+    const host = makeHost();
+    resetOverlaySuppressionOnNavigation(host, ctx.registry);
+    host.navigate(false, true);
+    assert.equal(ctx.registry.isOverlaySuppressed(), false);
+    assert.equal(ctx.attached.length, 2, "the active view is re-attached");
+  });
+
+  it("leaves suppression alone for in-place (SPA route) and subframe navigations", () => {
+    const ctx = suppressedRegistry();
+    const host = makeHost();
+    resetOverlaySuppressionOnNavigation(host, ctx.registry);
+    host.navigate(true, true); // pushState route change
+    host.navigate(false, false); // iframe
+    assert.equal(ctx.registry.isOverlaySuppressed(), true);
+  });
+
+  it("is a no-op without a subscribable webContents", () => {
+    assert.doesNotThrow(() => resetOverlaySuppressionOnNavigation(null, {}));
   });
 });
