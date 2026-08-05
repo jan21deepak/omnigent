@@ -146,6 +146,16 @@ export interface PendingUserMessage {
    * on snapshot-replayed entries (they're already server-owned).
    */
   posted?: boolean;
+  /**
+   * The message's wire position: how many committed `blocks` existed when
+   * this message was sent. The consumed handler inserts the promoted
+   * committed block at this index instead of appending, so blocks that
+   * commit AFTER the send (a routing-decision card, the first streamed
+   * reply deltas) render below the user message instead of above it — the
+   * out-of-order live render this fixes. Unset on snapshot-replayed
+   * entries, which reconcile at the tail (append) as before.
+   */
+  anchorIndex?: number;
 }
 
 /**
@@ -1187,7 +1197,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((s) => ({
       pendingUserMessages: [
         ...s.pendingUserMessages,
-        { tempId, content, ...(selfAuthor !== null ? { author: selfAuthor } : {}) },
+        {
+          tempId,
+          content,
+          // Wire position: committed blocks at send time. The consumed
+          // handler inserts the promoted block here so a routing card or
+          // early reply delta that commits during the turn lands below
+          // this message rather than above it.
+          anchorIndex: s.blocks.length,
+          ...(selfAuthor !== null ? { author: selfAuthor } : {}),
+        },
       ],
       // A new turn supersedes the prior turn's background-shell tally: the
       // "N background tasks still running" label must give way to "Working…" the
@@ -3811,6 +3830,29 @@ function committedUserBlock(
   };
 }
 
+/**
+ * Insert a promoted user block at its wire position (`anchorIndex`) so it
+ * keeps a stable place in the live transcript. Blocks that committed after
+ * the send — a routing-decision card, the first streamed reply deltas —
+ * already sit at indices >= the anchor, so inserting there renders them
+ * below the user message instead of above it.
+ *
+ * The anchor is clamped to `[0, blocks.length]`. A missing anchor
+ * (snapshot-replayed entries) or an out-of-range one falls back to a tail
+ * append — the historical behaviour.
+ */
+function insertUserBlockAtAnchor(
+  blocks: AnyBlock[],
+  block: UserMessageBlock,
+  anchorIndex: number | undefined,
+): AnyBlock[] {
+  if (anchorIndex === undefined || anchorIndex >= blocks.length) {
+    return [...blocks, block];
+  }
+  const at = Math.max(anchorIndex, 0);
+  return [...blocks.slice(0, at), block, ...blocks.slice(at)];
+}
+
 interface RefetchRunnerBackedSessionStateOptions {
   /** Force the AP server to re-read runner-backed caches before returning. */
   refreshState?: boolean;
@@ -4375,59 +4417,59 @@ export function handleSessionEvent(event: StreamEvent): void {
       //      the drop and strand the bubble as a duplicate.
       //   3. No pending entry — render the event payload as a fresh
       //      committed bubble (TUI-typed message, or another client).
+      // The promoted block lands at its matched entry's wire position
+      // (`anchorIndex`), not the tail, so blocks that committed while the
+      // message was still optimistic (a routing card, early reply deltas)
+      // render below it — see `insertUserBlockAtAnchor`.
       useChatStore.setState((s) => {
-        if (hasCommittedItem(s.blocks, event.itemId)) return {};
-
-        // 1. Drop by id when the server names the drained entry.
+        // Locate the optimistic entry this event drained: by the
+        // server-named id first (precise across rebinds), else the FIFO
+        // head (id not adopted yet / cross-client). Per-session SSE
+        // ordering makes the head the right entry; no text match, since
+        // the native transcript reformats text.
         const cleared = event.clearedPendingId;
-        if (cleared) {
-          const idx = s.pendingUserMessages.findIndex((p) => p.tempId === cleared);
-          if (idx >= 0) {
-            const matched = s.pendingUserMessages[idx]!;
-            const content = committedContentFor(event, matched.content);
-            if (content === null) return {};
-            return {
-              pendingUserMessages: [
-                ...s.pendingUserMessages.slice(0, idx),
-                ...s.pendingUserMessages.slice(idx + 1),
-              ],
-              // stableKey = the optimistic bubble's temp id → the
-              // promoted bubble keeps the same React key (no remount).
-              blocks: [
-                ...s.blocks,
-                committedUserBlock(
-                  event.itemId,
-                  content,
-                  matched.tempId,
-                  event.createdBy ?? matched.author,
-                ),
-              ],
-            };
-          }
-        }
+        let idx = cleared ? s.pendingUserMessages.findIndex((p) => p.tempId === cleared) : -1;
+        if (idx < 0 && s.pendingUserMessages.length > 0) idx = 0;
 
-        // 2. FIFO head fallback (id not adopted yet / cross-client).
-        const head = s.pendingUserMessages[0];
-        if (head) {
-          const content = committedContentFor(event, head.content);
-          if (content === null) return {};
+        // The item already committed (snapshot / relay won the race). Don't
+        // add a second bubble — but still drop the matched optimistic
+        // entry, or it would strand at the bottom of the transcript forever.
+        if (hasCommittedItem(s.blocks, event.itemId)) {
+          if (idx < 0) return {};
           return {
-            pendingUserMessages: s.pendingUserMessages.slice(1),
-            // stableKey = the popped optimistic bubble's temp id so the
-            // promoted bubble keeps the same React key (no remount/flink).
-            blocks: [
-              ...s.blocks,
-              committedUserBlock(
-                event.itemId,
-                content,
-                head.tempId,
-                event.createdBy ?? head.author,
-              ),
+            pendingUserMessages: [
+              ...s.pendingUserMessages.slice(0, idx),
+              ...s.pendingUserMessages.slice(idx + 1),
             ],
           };
         }
 
-        // 3. Nothing pending — render the event payload fresh.
+        // A matched optimistic entry — promote it at its wire position.
+        // stableKey = its temp id so the rendered bubble keeps the same
+        // React key across the optimistic→committed swap (no remount/flink).
+        if (idx >= 0) {
+          const matched = s.pendingUserMessages[idx]!;
+          const content = committedContentFor(event, matched.content);
+          if (content === null) return {};
+          return {
+            pendingUserMessages: [
+              ...s.pendingUserMessages.slice(0, idx),
+              ...s.pendingUserMessages.slice(idx + 1),
+            ],
+            blocks: insertUserBlockAtAnchor(
+              s.blocks,
+              committedUserBlock(
+                event.itemId,
+                content,
+                matched.tempId,
+                event.createdBy ?? matched.author,
+              ),
+              matched.anchorIndex,
+            ),
+          };
+        }
+
+        // Nothing pending — render the event payload fresh at the tail.
         const content = userContentFromEvent(event);
         if (content === null) return {};
         return {

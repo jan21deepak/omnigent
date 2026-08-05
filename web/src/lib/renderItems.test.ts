@@ -1392,6 +1392,89 @@ describe("buildBubbles — routing_decision (intelligent model router) chip", ()
     expect(chip.applied).toBe(true);
     expect(chip.model).toBe("databricks-claude-opus-4-8");
   });
+
+  it("hoists a late routing card above the reply so the response stays one bubble", () => {
+    // The smart-routing race: the reply starts streaming, THEN the routing
+    // card commits mid-response. It must render above a single assistant
+    // bubble, not split the stream into two bubbles around it.
+    const streaming: ActiveResponse = { responseId: "resp_1", state: "streaming", error: null };
+    const blocks: AnyBlock[] = [
+      { type: "text_chunk", ctx: ctx({ responseId: "resp_1" }), text: "Thinking " },
+      {
+        type: "routing_decision",
+        ctx: ctx({ itemId: "rd_late", responseId: "resp_1" }),
+        model: "databricks-claude-opus-4-8",
+        applied: true,
+        rationale: "late card",
+      },
+      { type: "text_chunk", ctx: ctx({ responseId: "resp_1" }), text: "answer." },
+    ];
+    const bubbles = buildBubbles(blocks, streaming);
+    expect(bubbles.map((b) => b.kind)).toEqual(["routing_decision", "assistant"]);
+    expect((bubbles[0] as Extract<Bubble, { kind: "routing_decision" }>).itemId).toBe("rd_late");
+    expect((bubbles[1] as Extract<Bubble, { kind: "assistant" }>).responseId).toBe("resp_1");
+  });
+
+  it("keeps a routing card that starts the next turn's reply as a standalone boundary", () => {
+    // The card's own reply is a DIFFERENT response, so it is not a late
+    // mid-reply card — it stays a standalone chip between the two turns.
+    const blocks: AnyBlock[] = [
+      {
+        type: "text_done",
+        ctx: ctx({ itemId: "a1", responseId: "resp_1" }),
+        fullText: "first answer",
+        hasCodeBlocks: false,
+      },
+      {
+        type: "routing_decision",
+        ctx: ctx({ itemId: "rd_next", responseId: "resp_2" }),
+        model: "databricks-claude-opus-4-8",
+        applied: true,
+        rationale: "next turn",
+      },
+      {
+        type: "text_done",
+        ctx: ctx({ itemId: "a2", responseId: "resp_2" }),
+        fullText: "second answer",
+        hasCodeBlocks: false,
+      },
+    ];
+    const bubbles = buildBubbles(blocks, null);
+    expect(bubbles.map((b) => b.kind)).toEqual(["assistant", "routing_decision", "assistant"]);
+  });
+
+  it("cache: a late card arriving mid-stream matches a from-scratch rebuild", () => {
+    // Incremental funnel: the card lands standalone at the tail (no reply
+    // yet), then a later delta continues the SAME response — turning it into
+    // a hoisted mid-reply card. Prefix reuse must not re-emit the chip
+    // standalone (a split) or duplicate it; each step equals a full rebuild.
+    const cache = createBubbleCache();
+    const streaming: ActiveResponse = { responseId: "resp_1", state: "streaming", error: null };
+    const step1: AnyBlock[] = [
+      { type: "text_chunk", ctx: ctx({ responseId: "resp_1" }), text: "Thinking " },
+    ];
+    expect(buildBubbles(step1, streaming, cache)).toEqual(buildBubbles(step1, streaming));
+
+    const step2: AnyBlock[] = [
+      ...step1,
+      {
+        type: "routing_decision",
+        ctx: ctx({ itemId: "rd_late", responseId: "resp_1" }),
+        model: "databricks-claude-opus-4-8",
+        applied: true,
+        rationale: "late card",
+      },
+    ];
+    expect(buildBubbles(step2, streaming, cache)).toEqual(buildBubbles(step2, streaming));
+
+    const step3: AnyBlock[] = [
+      ...step2,
+      { type: "text_chunk", ctx: ctx({ responseId: "resp_1" }), text: "answer." },
+    ];
+    const incremental = buildBubbles(step3, streaming, cache);
+    expect(incremental).toEqual(buildBubbles(step3, streaming));
+    expect(incremental.map((b) => b.kind)).toEqual(["routing_decision", "assistant"]);
+  });
 });
 
 describe("bubblesEqual — React.memo comparator", () => {
