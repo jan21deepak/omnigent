@@ -13,7 +13,7 @@ Two layers:
 from __future__ import annotations
 
 import base64
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import httpx
@@ -21,7 +21,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from omnigent.server.device_grant_store import hash_secret
+from omnigent.server.routes import client_credentials
 from omnigent.server.routes.client_credentials import ServiceClientConfig
+from omnigent.server.routes.rate_limit import SlidingWindowRateLimiter
 from tests.server.test_device_auth import _build_accounts_app
 
 _KEY = b"k" * 32
@@ -104,6 +106,22 @@ def test_config_clamps_ttl(
 # ── Token endpoint (integration) ──────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def fresh_failed_auth_budget(monkeypatch: pytest.MonkeyPatch) -> Callable[[], None]:
+    """Give each test its own failed-attempt budget (the limiter is a module
+    global keyed by source IP, which every TestClient shares)."""
+
+    def reset() -> None:
+        monkeypatch.setattr(
+            client_credentials,
+            "_failed_auth",
+            SlidingWindowRateLimiter(client_credentials._FAILED_AUTH_MAX, 60, 100),
+        )
+
+    reset()
+    return reset
+
+
 @pytest.fixture
 def app_with_device_grant(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     """Accounts app with both the device grant and a machine client."""
@@ -172,6 +190,26 @@ def test_client_credentials_token_acts_as_the_configured_principal(
     assert "grant_id" not in payload
 
 
+def test_client_credentials_is_exempt_from_the_device_client_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The device flow's shared secret gates the device endpoints only — the
+    machine client authenticates with its own id + secret."""
+    _set_client_env(monkeypatch)
+    monkeypatch.delenv(_TTL_ENV, raising=False)
+    monkeypatch.setenv("OMNIGENT_DEVICE_CLIENT_SECRET", "device-flow-shared-secret")
+    clients = _build_accounts_app(tmp_path, monkeypatch, device_grant_enabled=True)
+    with next(clients) as client:
+        assert _request_token(client).status_code == 200
+        # The device grants stay gated.
+        r = client.post(
+            "/oauth/token",
+            data={"grant_type": "refresh_token", "refresh_token": "whatever"},
+        )
+        assert r.status_code == 401
+        assert r.json()["error"] == "invalid_client"
+
+
 def test_client_credentials_accepts_http_basic(app_client_only: TestClient) -> None:
     creds = base64.b64encode(f"{_CLIENT_ID}:{_CLIENT_SECRET}".encode()).decode()
     r = app_client_only.post(
@@ -192,6 +230,23 @@ def test_client_credentials_rejects_bad_credentials(
     r = _request_token(app_client_only, client_id=client_id, client_secret=client_secret)
     assert r.status_code == 401
     assert r.json()["error"] == "invalid_client"
+
+
+def test_client_credentials_throttles_failed_attempts(
+    app_client_only: TestClient, fresh_failed_auth_budget: Callable[[], None]
+) -> None:
+    """The secret is the only thing guarding the endpoint, so online guessing
+    is capped per source IP — and a correct client is not collateral."""
+    for _ in range(client_credentials._FAILED_AUTH_MAX):
+        assert _request_token(app_client_only, client_secret="guess").status_code == 401
+    r = _request_token(app_client_only, client_secret="guess")
+    assert r.status_code == 429
+    assert r.json()["error"] == "slow_down"
+
+    # Only failures are charged, so a correct client never spends the budget.
+    fresh_failed_auth_budget()
+    for _ in range(client_credentials._FAILED_AUTH_MAX + 5):
+        assert _request_token(app_client_only).status_code == 200
 
 
 def test_client_credentials_requires_credentials(app_client_only: TestClient) -> None:

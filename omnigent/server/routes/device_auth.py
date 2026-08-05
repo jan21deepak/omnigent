@@ -72,6 +72,7 @@ from omnigent.server.routes.client_credentials import (
     ServiceClientConfig,
     handle_client_credentials_grant,
 )
+from omnigent.server.routes.rate_limit import RATE_LIMITER_MAX_KEYS, SlidingWindowRateLimiter
 
 _logger = logging.getLogger(__name__)
 
@@ -218,59 +219,6 @@ _AUTHORIZE_RATE_WINDOW_SECONDS = 60  # …per client per this window.
 _PURGE_MIN_INTERVAL_SECONDS = 300
 
 
-# Hard cap on distinct keys the limiter tracks at once. Bounds memory even
-# under a spray from many source IPs (e.g. a whole IPv6 /64) — without it a
-# key hit once and never revisited would live forever. When the cap is hit
-# the whole table is swept of aged-out keys; if still full, the limiter
-# fails OPEN for a new key (availability over a soft throttle — the real
-# anti-abuse control in production is the confidential client secret).
-_RATE_LIMITER_MAX_KEYS = 10_000
-
-
-class _SlidingWindowRateLimiter:
-    """Minimal per-key sliding-window limiter (in-memory, single-process).
-
-    Keyed by client IP. Adequate for a single-process socket-mode
-    deployment; a multi-replica server would want a shared store, but the
-    grant table's own single-use/expiry semantics already bound abuse.
-
-    Memory is bounded by :data:`_RATE_LIMITER_MAX_KEYS`: keys are dropped
-    when they age out (on touch) and, when the cap is reached, a full sweep
-    reclaims every aged-out key before admitting a new one.
-    """
-
-    def __init__(self, max_events: int, window_seconds: int, max_keys: int) -> None:
-        self._max = max_events
-        self._window = window_seconds
-        self._max_keys = max_keys
-        self._hits: dict[str, list[float]] = {}
-
-    def _sweep(self, cutoff: float) -> None:
-        """Drop every key whose hits have all aged out."""
-        dead = [k for k, ts in self._hits.items() if not any(t > cutoff for t in ts)]
-        for k in dead:
-            self._hits.pop(k, None)
-
-    def allow(self, key: str, now: float) -> bool:
-        cutoff = now - self._window
-        # New key while at capacity: sweep aged-out keys first; if the table
-        # is still full of live keys, fail open rather than grow unbounded.
-        if key not in self._hits and len(self._hits) >= self._max_keys:
-            self._sweep(cutoff)
-            if len(self._hits) >= self._max_keys:
-                return True
-        hits = [t for t in self._hits.get(key, ()) if t > cutoff]
-        # Opportunistically bound memory: drop keys that fully aged out.
-        if not hits:
-            self._hits.pop(key, None)
-        if len(hits) >= self._max:
-            self._hits[key] = hits
-            return False
-        hits.append(now)
-        self._hits[key] = hits
-        return True
-
-
 def create_device_auth_router(
     auth_provider: UnifiedAuthProvider,
     device_grant_store: DeviceGrantStore,
@@ -325,8 +273,8 @@ def create_device_auth_router(
         return hmac.compare_digest(presented.encode("utf-8"), client_secret.encode("utf-8"))
 
     router = APIRouter()
-    _rate_limiter = _SlidingWindowRateLimiter(
-        _AUTHORIZE_RATE_MAX, _AUTHORIZE_RATE_WINDOW_SECONDS, _RATE_LIMITER_MAX_KEYS
+    _rate_limiter = SlidingWindowRateLimiter(
+        _AUTHORIZE_RATE_MAX, _AUTHORIZE_RATE_WINDOW_SECONDS, RATE_LIMITER_MAX_KEYS
     )
     # Last time we purged expired grants; gates the opportunistic purge on
     # authorize so the table stays bounded without a separate scheduler.
@@ -576,15 +524,12 @@ def create_device_auth_router(
         ``slow_down``, ``expired_token``, ``access_denied``,
         ``invalid_grant``, ``unsupported_grant_type``.
         """
-        if not _client_secret_ok(request):
-            return _oauth_error("invalid_client", status_code=401)
         form = await request.form()
         grant_type = str(form.get("grant_type") or "")
 
-        if grant_type == "urn:ietf:params:oauth:grant-type:device_code":
-            return _handle_device_code_grant(str(form.get("device_code") or ""))
-        if grant_type == "refresh_token":
-            return _handle_refresh_grant(str(form.get("refresh_token") or ""))
+        # The machine client authenticates with its own id + secret, so it is
+        # exempt from the device flow's shared-secret gate (which exists to
+        # close the *device* endpoints to unauthorized initiators).
         if grant_type == CLIENT_CREDENTIALS_GRANT_TYPE and service_client is not None:
             return handle_client_credentials_grant(
                 request,
@@ -594,6 +539,13 @@ def create_device_auth_router(
                 provider_name=provider_name,
                 is_admin=is_admin,
             )
+        if not _client_secret_ok(request):
+            return _oauth_error("invalid_client", status_code=401)
+
+        if grant_type == "urn:ietf:params:oauth:grant-type:device_code":
+            return _handle_device_code_grant(str(form.get("device_code") or ""))
+        if grant_type == "refresh_token":
+            return _handle_refresh_grant(str(form.get("refresh_token") or ""))
         return _oauth_error("unsupported_grant_type")
 
     def _handle_device_code_grant(device_code: str) -> Response:

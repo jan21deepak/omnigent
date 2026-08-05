@@ -61,7 +61,17 @@ inside an allowlisted path.
 
 No refresh token (RFC 6749 §4.4.3): the token is short-lived and the client
 re-presents its secret. The secret is compared in constant time against the
-stored digest; a mismatch is `401 invalid_client`.
+stored digest; a mismatch is `401 invalid_client`. Since the secret is the
+only thing guarding the endpoint, failed attempts are throttled per source IP
+(10 per minute, then `429 slow_down`) to blunt online guessing. Only failures
+are charged, so a client fetching a token each TTL never spends the budget.
+
+The key is the socket peer, as in the device grant's limiter: behind a reverse
+proxy every request presents the proxy's address, so the budget is effectively
+global there. That is a coarse backstop rather than per-caller fairness, and
+deliberately so — honouring `X-Forwarded-For` without a trusted-proxy
+configuration would let a guesser spoof a fresh budget per request. Deployments
+that want per-caller throttling should rate-limit at the proxy.
 
 ### Reuse of the delegated machinery
 
@@ -85,9 +95,26 @@ configured client is handed to it and it dispatches `client_credentials`
 itself; when it is not, a standalone router provides the same endpoint. The
 two never both claim the path, and either grant works without the other.
 
+The device flow's optional shared secret (`OMNIGENT_DEVICE_CLIENT_SECRET`)
+gates the *device* endpoints, whose initiator is otherwise unauthenticated.
+The machine client presents its own id and secret, so it is dispatched before
+that gate and never needs the device secret — the grant behaves identically
+whether or not the device grant is mounted alongside it.
+
+### Revocation
+
+A machine token names no grant, so unlike a device-grant token it is not
+revocable mid-flight: it is a stateless HS256 JWT and stays valid for its TTL
+(≤ 1 h), and rotating the client secret only stops *new* tokens from being
+issued. The short TTL is the bound. Making machine tokens revocable would mean
+persisting a per-client grant row and paying its lookup on every request — the
+thing the token's statelessness buys back for a caller that re-authenticates
+cheaply.
+
 ## Out of scope / follow-ups
 
 - More than one confidential client (this is a single env-configured
   client; a table of clients would want an admin UI and a store).
 - Per-client scopes beyond the single "session APIs, no admin" scope.
-- Rotating a client secret without a restart.
+- Rotating a client secret without a restart, and a kill switch for tokens
+  already issued to a client (see Revocation above).
