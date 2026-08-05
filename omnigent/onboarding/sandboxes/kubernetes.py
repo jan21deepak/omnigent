@@ -136,18 +136,12 @@ _MANAGED_BY_VALUE: str = "omnigent"
 _ROLE_LABEL: str = "omnigent.ai/role"
 _ROLE_VALUE: str = "sandbox-host"
 
-# Classifier stamped on a runner Pod when its session is bound to a BUILT-IN
-# agent, so cluster-level policy an operator owns (admission-time credential
-# injection, a NetworkPolicy, a node pool) can target one agent's Pods instead
-# of every managed runner. Absent for a session-scoped agent: the server only
-# passes a name it derived from the bound agent's identity, so the label cannot
-# be claimed by naming a session agent after a built-in.
+# Built-in agent a runner Pod runs, so cluster policy can select one agent's
+# Pods (see :func:`_pod_labels`).
 _AGENT_LABEL: str = "omnigent.ai/agent"
 
-# Kubernetes label values: at most 63 characters, alphanumeric at each end, with
-# dashes / underscores / dots in between (an empty value is legal but useless as
-# a classifier). A name that cannot be expressed is dropped rather than
-# rewritten — a mangled value would silently match the wrong policy.
+# A Kubernetes label value: at most 63 characters, alphanumeric at each end,
+# dashes / underscores / dots in between.
 _LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$")
 
 # Non-root identity the Pod runs as: the ``sandbox`` user/group baked into the
@@ -446,7 +440,14 @@ def _pod_labels(agent_name: str | None) -> dict[str, str]:
 
     The managed-by / role pair identifies omnigent-managed objects; the
     :data:`_AGENT_LABEL` classifier is added only for a session bound to a
-    built-in agent whose name is expressible as a label value.
+    built-in agent whose name is expressible as a label value. It lets
+    cluster-level policy an operator owns (admission-time credential
+    injection, a ``NetworkPolicy``, a node pool) target one agent's Pods
+    instead of every managed runner, so it must not be forgeable: the
+    server passes only a name derived from the bound agent's identity, and
+    a session-scoped agent named after a built-in yields none. A name that
+    is not expressible is dropped rather than rewritten, because a mangled
+    value would silently match the wrong policy.
 
     :param agent_name: Name of the built-in agent the session is bound to, or
         ``None`` (session-scoped agent, or no agent resolved) for no classifier.
