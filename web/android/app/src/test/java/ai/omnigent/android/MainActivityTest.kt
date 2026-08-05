@@ -112,15 +112,19 @@ class MainActivityTest {
         val density = activity.resources.displayMetrics.density
         val target = (48 * density).toInt()
 
-        slot.layout(100, 40, 220, 40 + target)
-        pill.layout(0, 0, 120, (27 * density).toInt())
+        val spec = View.MeasureSpec.makeMeasureSpec(2000, View.MeasureSpec.AT_MOST)
+        slot.measure(spec, spec)
+        slot.layout(100, 40, 100 + slot.measuredWidth, 40 + slot.measuredHeight)
 
+        // A minimum rather than a fixed height, so a taller pill isn't clipped.
+        assertEquals(target, slot.minimumHeight)
+        assertTrue(slot.measuredHeight >= target)
         // The slot, not the root container: the full-screen WebView consumes
         // touches before a root-level delegate would be consulted.
         val delegate = shadowOf(slot.touchDelegate)
         assertEquals(pill, delegate.delegateView)
-        assertEquals(target, delegate.bounds.height())
-        assertEquals(target, slot.height)
+        assertEquals(slot.height, delegate.bounds.height())
+        assertTrue(delegate.bounds.height() >= target)
     }
 
     @Test

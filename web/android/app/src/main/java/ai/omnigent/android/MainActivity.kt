@@ -325,8 +325,10 @@ class MainActivity : AppCompatActivity() {
             setPadding((12 * dp).toInt(), (6 * dp).toInt(), (12 * dp).toInt(), (6 * dp).toInt())
             elevation = 6 * dp
         }
+        // A minimum, not a fixed height: a pill taller than the tap target at
+        // large font scales must still grow rather than clip its label.
+        switchButtonSlot.minimumHeight = (MIN_TAP_TARGET_DP * dp).toInt()
         (switchButtonSlot.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
-            lp.height = (MIN_TAP_TARGET_DP * dp).toInt()
             // Initial position below the status bar; corrected by the insets
             // listener once system bar insets are measured.
             lp.topMargin = (8 * dp).toInt()
