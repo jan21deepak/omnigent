@@ -315,6 +315,16 @@ function registerBrowserIpc({ ipcMain, isPinnedOriginSender, getRegistryForEvent
     return { ok: r.ok, error: r.error };
   });
 
+  // Hide/show the active native view while the renderer shows an overlay
+  // (dialog, lightbox, toast). The native view paints above the entire
+  // renderer DOM, so suppression is the only way an overlay becomes visible.
+  ipcMain.handle("omnigent:browser-set-overlay-suppressed", (event, args) => {
+    const g = gateRegistry(event);
+    if (g.error) return { ok: false, error: g.error };
+    const r = g.registry.setOverlaySuppressed(!!args?.suppressed);
+    return { ok: r.ok, suppressed: r.suppressed, error: r.error };
+  });
+
   // Reposition the active conversation's view to freshly-measured bounds.
   ipcMain.handle("omnigent:browser-resize", (event, args) => {
     const g = gateRegistry(event);

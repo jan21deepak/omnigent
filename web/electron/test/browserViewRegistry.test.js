@@ -332,3 +332,51 @@ describe("browserViewRegistry — child window.open is denied (S3)", () => {
     assert.deepEqual(windowOpen("https://example.com/ok"), { action: "deny" });
   });
 });
+
+describe("browserViewRegistry — overlay suppression", () => {
+  let ctx;
+  beforeEach(() => {
+    ctx = makeRegistry();
+  });
+
+  it("detaches the active view while suppressed and re-attaches on restore", () => {
+    ctx.registry.openOrNavigate("conv_1", "https://example.com");
+    ctx.registry.setActive("conv_1");
+    assert.equal(ctx.attached.length, 1);
+
+    ctx.registry.setOverlaySuppressed(true);
+    assert.equal(ctx.registry.isOverlaySuppressed(), true);
+    assert.equal(ctx.detached.length, 1, "suppression detaches the active view");
+    assert.equal(ctx.registry.activeConversationId(), "conv_1", "view stays active");
+
+    ctx.registry.setOverlaySuppressed(false);
+    assert.equal(ctx.attached.length, 2, "restore re-attaches the same view");
+  });
+
+  it("is idempotent — repeated calls with the same value do nothing", () => {
+    ctx.registry.openOrNavigate("conv_1", "https://example.com");
+    ctx.registry.setActive("conv_1");
+    ctx.registry.setOverlaySuppressed(true);
+    ctx.registry.setOverlaySuppressed(true);
+    assert.equal(ctx.detached.length, 1);
+    ctx.registry.setOverlaySuppressed(false);
+    ctx.registry.setOverlaySuppressed(false);
+    assert.equal(ctx.attached.length, 2);
+  });
+
+  it("does not attach a view activated while suppressed until restore", () => {
+    ctx.registry.openOrNavigate("conv_1", "https://example.com");
+    ctx.registry.setOverlaySuppressed(true);
+    ctx.registry.setActive("conv_1");
+    assert.equal(ctx.attached.length, 0, "no paint over the overlay");
+    ctx.registry.setOverlaySuppressed(false);
+    assert.equal(ctx.attached.length, 1);
+  });
+
+  it("suppression with no active view is a no-op", () => {
+    ctx.registry.setOverlaySuppressed(true);
+    assert.equal(ctx.detached.length, 0);
+    ctx.registry.setOverlaySuppressed(false);
+    assert.equal(ctx.attached.length, 0);
+  });
+});

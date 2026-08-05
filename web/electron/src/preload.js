@@ -196,6 +196,13 @@ contextBridge.exposeInMainWorld("omnigentDesktop", {
   browserSetActive: (conversationId) =>
     ipcRenderer.invoke("omnigent:browser-set-active", { conversationId }),
   /**
+   * Hide/show the active native browser view while the renderer paints an
+   * overlay (dialog, lightbox, toast) that would otherwise be covered.
+   * @param {boolean} suppressed
+   */
+  browserSetOverlaySuppressed: (suppressed) =>
+    ipcRenderer.invoke("omnigent:browser-set-overlay-suppressed", { suppressed }),
+  /**
    * Reposition the conversation's view to freshly-measured placeholder bounds.
    * @param {string} conversationId
    * @param {{x:number,y:number,width:number,height:number,devicePixelRatio?:number}} bounds

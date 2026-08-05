@@ -11,6 +11,7 @@ import {
 import * as DialogPrimitive from "radix-ui/dialog";
 import { XIcon, ZoomInIcon, ZoomOutIcon } from "lucide-react";
 
+import { useSuppressBrowserView } from "@/hooks/useSuppressBrowserView";
 import { getEmbedRoot } from "@/lib/host";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -202,6 +203,10 @@ function ZoomViewer({ image }: { image: LightboxImage }) {
  */
 export function ImageLightboxProvider({ children }: { children: React.ReactNode }) {
   const [image, setImage] = useState<LightboxImage | null>(null);
+
+  // The lightbox uses the raw Radix primitives (not the shared DialogOverlay),
+  // so it asks for native-browser-view suppression itself while it is open.
+  useSuppressBrowserView(image !== null);
 
   const open = useCallback((img: LightboxImage) => setImage(img), []);
   const value = useMemo(() => ({ open }), [open]);

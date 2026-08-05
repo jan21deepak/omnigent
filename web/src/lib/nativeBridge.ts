@@ -183,6 +183,14 @@ interface ElectronDesktopApi extends NativeShellApi {
     bounds?: unknown,
     opts?: { force?: boolean; agent?: boolean },
   ) => Promise<{ ok: boolean; created?: boolean; error?: string }>;
+  /**
+   * Detach/re-attach the active embedded browser view so renderer overlays
+   * (dialogs, lightbox, toasts) are visible — the native view always paints
+   * above the whole DOM. Absent on shells predating overlay suppression.
+   */
+  browserSetOverlaySuppressed?: (
+    suppressed: boolean,
+  ) => Promise<{ ok: boolean; suppressed?: boolean; error?: string }>;
 }
 
 /** A lifecycle action for the host daemon. */
@@ -582,6 +590,20 @@ export function onNativeInsets(callback: (insets: NativeInsets) => void): () => 
   } catch (err) {
     console.warn("[nativeBridge] native onNativeInsets failed:", err);
     return () => {};
+  }
+}
+
+/**
+ * Hide (or restore) the embedded browser's native view so a renderer overlay
+ * is visible. No-op outside Electron or on a shell without the bridge method.
+ */
+export async function setBrowserOverlaySuppressed(suppressed: boolean): Promise<void> {
+  const electron = electronApi();
+  if (!electron?.browserSetOverlaySuppressed) return;
+  try {
+    await electron.browserSetOverlaySuppressed(suppressed);
+  } catch (err) {
+    console.warn("[nativeBridge] electron browserSetOverlaySuppressed failed:", err);
   }
 }
 
