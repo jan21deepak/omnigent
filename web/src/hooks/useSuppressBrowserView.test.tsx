@@ -1,7 +1,6 @@
-// The embedded browser's native WebContentsView paints above the whole
-// renderer DOM, so every overlay must ask the shell to hide it. These tests pin
-// the ref-counting (overlapping overlays restore exactly once) and that the
-// shared DialogOverlay wires it up for every dialog.
+// The embedded browser's native view paints above the whole renderer DOM, so
+// overlays ask the shell to hide it. These tests pin the ref-counting and the
+// shared DialogOverlay wiring.
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 

@@ -33,10 +33,9 @@ function createBrowserViewRegistry({
 } = {}) {
   const entries = new Map(); // conversationId -> BrowserViewEntry
   let activeConversationId = null;
-  // While true the active view is detached from the host window even though it
-  // stays "active". The native view is a sibling of the renderer's view and
-  // always paints above the whole DOM, so a renderer overlay (dialog, lightbox,
-  // toast) can only be seen while the view is off the host.
+  // While true the active view is detached from the host even though it stays
+  // "active": the native view paints above the whole DOM, so a renderer overlay
+  // is only visible while the view is off the host.
   let overlaySuppressed = false;
 
   // Attach the entry's view unless an overlay is currently suppressing paint.
