@@ -1813,6 +1813,7 @@ def create_runner_app(
 
     _version_cache: dict[str, int] = {}  # conversation_id → last seen agent_version
     _spec_cache: dict[str, Any] = {}  # agent_id → cached AgentSpec for terminal tools
+    _spec_cache_epochs: dict[str, int] = {}  # agent_id → invalidation counter
     _resp_to_conv: dict[str, str] = {}  # harness response_id → conversation_id
     _live_response_id: dict[str, str] = {}
     _session_start_cache: dict[str, float] = {}  # session_id → registered start time
@@ -1829,6 +1830,22 @@ def create_runner_app(
     _session_claude_launch_config_tasks: dict[
         str, asyncio.Task[ClaudeNativeUcodeConfig | None]
     ] = {}
+
+    def _spec_cache_epoch(agent_id: str) -> int:
+        return _spec_cache_epochs.get(agent_id, 0)
+
+    def _invalidate_spec_cache(agent_id: str) -> None:
+        """Drop the shared agent spec and mark in-flight resolutions as stale."""
+        _spec_cache.pop(agent_id, None)
+        _spec_cache_epochs[agent_id] = _spec_cache_epochs.get(agent_id, 0) + 1
+
+    def _store_spec_cache(agent_id: str, epoch: int, entry: Any) -> bool:
+        """Publish a resolved spec unless the agent was invalidated during resolution."""
+        if _spec_cache_epochs.get(agent_id, 0) != epoch:
+            _logger.debug("discarding superseded spec cache write for agent %s", agent_id)
+            return False
+        _spec_cache[agent_id] = entry
+        return True
 
     async def _resolve_session_claude_launch_config(
         session_id: str,
@@ -5376,6 +5393,7 @@ def create_runner_app(
                 _turn_spec_entry = _session_entry
                 _turn_spec = _unwrap_resolved_spec(_session_entry)
             if _turn_spec is None and spec_resolver is not None:
+                _eager_epoch = _spec_cache_epoch(_turn_agent_id)
                 try:
                     _resolved_turn_spec = await spec_resolver(_turn_agent_id, conv_id)
                     _turn_spec = _unwrap_resolved_spec(_resolved_turn_spec)
@@ -5392,7 +5410,7 @@ def create_runner_app(
                     )
                 else:
                     if _turn_spec is not None:
-                        _spec_cache[_turn_agent_id] = _resolved_turn_spec
+                        _store_spec_cache(_turn_agent_id, _eager_epoch, _resolved_turn_spec)
                         _turn_spec_entry = _resolved_turn_spec
             _turn_spec_resolved = True
             _turn_mcp: Any = ProxyMcpManager(conv_id, server_client)
@@ -5423,6 +5441,7 @@ def create_runner_app(
                 _turn_spec_entry = cached
                 _turn_spec = _unwrap_resolved_spec(cached)
                 return cached, None
+            lazy_epoch = _spec_cache_epoch(_turn_agent_id)
             try:
                 resolved = await spec_resolver(_turn_agent_id, conv_id)
             except (httpx.HTTPError, RuntimeError) as exc:
@@ -5437,7 +5456,7 @@ def create_runner_app(
                     "Failed to resolve the agent spec for this turn.",
                 )
             if resolved is not None:
-                _spec_cache[_turn_agent_id] = resolved
+                _store_spec_cache(_turn_agent_id, lazy_epoch, resolved)
                 _turn_spec_entry = resolved
                 _turn_spec = _unwrap_resolved_spec(resolved)
                 return resolved, None
@@ -7827,7 +7846,7 @@ def create_runner_app(
         _session_mcp_spec_hash.pop(session_id, None)
         _session_snapshot_cache.pop(session_id, None)
         if agent_id:
-            _spec_cache.pop(agent_id, None)
+            _invalidate_spec_cache(agent_id)
 
     @app.delete("/v1/sessions/{session_id}/resources")
     async def cleanup_session_resources(
