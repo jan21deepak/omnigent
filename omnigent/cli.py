@@ -1224,6 +1224,8 @@ def _preregister_agent(  # type: ignore[explicit-any]  # agent_store / artifact_
         silently ignored on the next request.
     :returns: The registered agent id, or ``None`` if the source
         spec has no name and is skipped.
+    :raises click.ClickException: If the spec declares a function
+        policy whose dotted path cannot be imported.
     """
     import gzip
     import hashlib
@@ -1232,6 +1234,16 @@ def _preregister_agent(  # type: ignore[explicit-any]  # agent_store / artifact_
 
     from omnigent.db.utils import generate_agent_id
     from omnigent.spec import load, materialize_bundle
+    from omnigent.spec.pack_imports import (
+        ensure_pack_root_importable,
+        unimportable_function_policy_paths,
+    )
+
+    # A pack that lives inside a Python package declares its policies
+    # by a dotted path relative to that package's root; policy
+    # evaluation happens in this process, so the root has to be
+    # importable regardless of the cwd the server was started from.
+    ensure_pack_root_importable(agent_source)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         bundle_dir = materialize_bundle(agent_source, Path(tmpdir) / "bundle")
@@ -1255,6 +1267,15 @@ def _preregister_agent(  # type: ignore[explicit-any]  # agent_store / artifact_
     if spec.name is None:
         click.echo(f"  warning: {agent_source} has no name, skipping")
         return None
+
+    # Fail at registration rather than denying every turn fail-closed
+    # once a session starts.
+    failures = unimportable_function_policy_paths(spec)
+    if failures:
+        details = "; ".join(f"{path} ({reason})" for path, reason in failures)
+        raise click.ClickException(
+            f"{agent_source}: function policy path(s) cannot be imported: {details}",
+        )
 
     # Idempotent registration. Mirrors
     # :func:`omnigent.inner.cli._omnigent_register_yaml_bundle` —
