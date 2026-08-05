@@ -576,15 +576,12 @@ def create_device_auth_router(
         ``slow_down``, ``expired_token``, ``access_denied``,
         ``invalid_grant``, ``unsupported_grant_type``.
         """
-        if not _client_secret_ok(request):
-            return _oauth_error("invalid_client", status_code=401)
         form = await request.form()
         grant_type = str(form.get("grant_type") or "")
 
-        if grant_type == "urn:ietf:params:oauth:grant-type:device_code":
-            return _handle_device_code_grant(str(form.get("device_code") or ""))
-        if grant_type == "refresh_token":
-            return _handle_refresh_grant(str(form.get("refresh_token") or ""))
+        # The machine client authenticates with its own id + secret, so it is
+        # exempt from the device flow's shared-secret gate (which exists to
+        # close the *device* endpoints to unauthorized initiators).
         if grant_type == CLIENT_CREDENTIALS_GRANT_TYPE and service_client is not None:
             return handle_client_credentials_grant(
                 request,
@@ -594,6 +591,13 @@ def create_device_auth_router(
                 provider_name=provider_name,
                 is_admin=is_admin,
             )
+        if not _client_secret_ok(request):
+            return _oauth_error("invalid_client", status_code=401)
+
+        if grant_type == "urn:ietf:params:oauth:grant-type:device_code":
+            return _handle_device_code_grant(str(form.get("device_code") or ""))
+        if grant_type == "refresh_token":
+            return _handle_refresh_grant(str(form.get("refresh_token") or ""))
         return _oauth_error("unsupported_grant_type")
 
     def _handle_device_code_grant(device_code: str) -> Response:

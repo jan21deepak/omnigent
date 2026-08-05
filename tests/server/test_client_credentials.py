@@ -172,6 +172,26 @@ def test_client_credentials_token_acts_as_the_configured_principal(
     assert "grant_id" not in payload
 
 
+def test_client_credentials_is_exempt_from_the_device_client_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The device flow's shared secret gates the device endpoints only — the
+    machine client authenticates with its own id + secret."""
+    _set_client_env(monkeypatch)
+    monkeypatch.delenv(_TTL_ENV, raising=False)
+    monkeypatch.setenv("OMNIGENT_DEVICE_CLIENT_SECRET", "device-flow-shared-secret")
+    clients = _build_accounts_app(tmp_path, monkeypatch, device_grant_enabled=True)
+    with next(clients) as client:
+        assert _request_token(client).status_code == 200
+        # The device grants stay gated.
+        r = client.post(
+            "/oauth/token",
+            data={"grant_type": "refresh_token", "refresh_token": "whatever"},
+        )
+        assert r.status_code == 401
+        assert r.json()["error"] == "invalid_client"
+
+
 def test_client_credentials_accepts_http_basic(app_client_only: TestClient) -> None:
     creds = base64.b64encode(f"{_CLIENT_ID}:{_CLIENT_SECRET}".encode()).decode()
     r = app_client_only.post(
