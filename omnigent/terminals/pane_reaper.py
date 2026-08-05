@@ -38,7 +38,10 @@ import os
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
+
+if TYPE_CHECKING:
+    from omnigent.inner.terminal import TerminalInstance
 
 _logger = logging.getLogger(__name__)
 
@@ -79,12 +82,16 @@ class PaneRef(NamedTuple):
         ``terminal_resource_id("claude", "main")`` — used for pane-scoped close.
     :param terminal_name: Harness short-name, e.g. ``"claude"``.
     :param socket_path: tmux socket for the attached-client probe.
+    :param instance: The pane's terminal instance at selection time. Teardown is
+        scoped to it, so a pane re-created between selection and reap (the idle
+        clock observed the old one) is never closed.
     """
 
     conversation_id: str
     terminal_id: str
     terminal_name: str
     socket_path: Path
+    instance: TerminalInstance | None = None
 
 
 def resolve_native_pane_idle_timeout_s() -> float:

@@ -352,8 +352,11 @@ class TerminalRegistry:
             for (name, key), instance in slot.items()
         ]
 
-    def native_panes(self) -> list[tuple[str, str, Path]]:
-        """Return live native-harness CLI panes as ``(conversation_id, name, socket_path)``.
+    def native_panes(self) -> list[tuple[str, str, Path, TerminalInstance]]:
+        """Return live native-harness CLI panes.
+
+        Each entry is ``(conversation_id, name, socket_path, instance)``; the
+        instance lets the reaper scope its teardown to the pane it observed.
 
         A "native pane" is a terminal whose name is a native harness short name
         (``claude`` / ``codex`` / ``cursor`` / ...) with session key ``"main"``.
@@ -363,17 +366,17 @@ class TerminalRegistry:
         terminal that merely shares the name is never reclaimed. Snapshot
         semantics; sync (map read only, no tmux I/O).
 
-        :returns: ``(conversation_id, terminal_name, tmux_socket_path)`` per live
-            name-matching native pane.
+        :returns: ``(conversation_id, terminal_name, tmux_socket_path, instance)``
+            per live name-matching native pane.
         """
         from omnigent.terminals.pane_reaper import NATIVE_PANE_TERMINAL_NAMES
 
-        out: list[tuple[str, str, Path]] = []
+        out: list[tuple[str, str, Path, TerminalInstance]] = []
         with self._lock:
             for conv_id, slot in self._by_conversation.items():
                 for (name, key), instance in slot.items():
                     if key == "main" and name in NATIVE_PANE_TERMINAL_NAMES:
-                        out.append((conv_id, name, instance.socket_path))
+                        out.append((conv_id, name, instance.socket_path, instance))
         return out
 
     def transfer(
@@ -431,6 +434,8 @@ class TerminalRegistry:
         conversation_id: str,
         terminal_name: str,
         session_key: str,
+        *,
+        expected_instance: TerminalInstance | None = None,
     ) -> bool:
         """Close one terminal and remove it from the registry.
 
@@ -442,14 +447,20 @@ class TerminalRegistry:
         :param conversation_id: Owning conversation id.
         :param terminal_name: Terminal spec name.
         :param session_key: Session key.
+        :param expected_instance: When given, close only if this exact
+            instance still holds the key. A deferred cleanup that observed
+            one terminal passes the instance it observed so it cannot evict
+            a replacement that took the key in the meantime.
         :returns: ``True`` if a live instance was closed, ``False``
             if no live instance was found (already-closed or
-            never-launched).
+            never-launched), or if another instance holds the key.
         """
         key = (terminal_name, session_key)
         with self._lock:
             slot = self._by_conversation.get(conversation_id)
             if slot is None:
+                return False
+            if expected_instance is not None and slot.get(key) is not expected_instance:
                 return False
             instance = slot.pop(key, None)
             if not slot:

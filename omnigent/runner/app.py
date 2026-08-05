@@ -8418,12 +8418,12 @@ def create_runner_app(
 
         def _native_panes_for_reaper() -> list[PaneRef]:
             panes: list[PaneRef] = []
-            for conv_id, name, socket_path in _pane_reaper_registry.native_panes():
+            for conv_id, name, socket_path, instance in _pane_reaper_registry.native_panes():
                 terminal_id = terminal_resource_id(name, "main")
                 if is_native_harness(
                     resource_registry.terminal_resource_role(conv_id, terminal_id)
                 ):
-                    panes.append(PaneRef(conv_id, terminal_id, name, socket_path))
+                    panes.append(PaneRef(conv_id, terminal_id, name, socket_path, instance))
             return panes
 
         async def _native_pane_is_busy(pane: PaneRef) -> bool:
@@ -8438,15 +8438,23 @@ def create_runner_app(
             return bool(clients)
 
         async def _reap_native_pane(pane: PaneRef) -> None:
-            try:
-                await resource_registry.close_terminal(pane.conversation_id, pane.terminal_id)
-            finally:
-                _publish_terminal_deleted_event(
-                    conversation_id=pane.conversation_id,
-                    terminal_name=pane.terminal_name,
-                    session_key="main",
-                    publish_event=_publish_event,
-                )
+            # Scope the close to the pane the idle clock observed: a turn that
+            # started meanwhile may have re-created the terminal under the same
+            # resource id, and that replacement must survive — as must its
+            # resource, so the deletion is published only when we closed ours.
+            closed = await resource_registry.close_terminal(
+                pane.conversation_id,
+                pane.terminal_id,
+                expected_instance=pane.instance,
+            )
+            if not closed:
+                return
+            _publish_terminal_deleted_event(
+                conversation_id=pane.conversation_id,
+                terminal_name=pane.terminal_name,
+                session_key="main",
+                publish_event=_publish_event,
+            )
 
         app.state.native_pane_reaper = NativePaneReaper(
             list_native_panes=_native_panes_for_reaper,
