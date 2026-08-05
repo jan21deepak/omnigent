@@ -69,6 +69,11 @@ class MainActivity : AppCompatActivity() {
     // with older web builds). Theme-aware via brand colors (light/dark XML).
     private lateinit var switchButton: View
 
+    // Transparent slot holding the pill. It sits above the WebView so the pill's
+    // enlarged tap target (see expandSwitchButtonTouchTarget) claims touches the
+    // WebView would otherwise consume.
+    private lateinit var switchButtonSlot: FrameLayout
+
     // WebChromeClient affordances that need Activity-scoped result launchers.
     // Transient by design: rotation is covered by configChanges (no recreation),
     // so the only loss is the process-death case (killed while the picker /
@@ -176,18 +181,26 @@ class MainActivity : AppCompatActivity() {
                 setOnClickListener { showServerSwitcherMenu(it) }
             }
         switchButton.layoutParams =
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.CENTER_HORIZONTAL,
+            )
+        switchButtonSlot = FrameLayout(this)
+        switchButtonSlot.addView(switchButton)
+        switchButtonSlot.layoutParams =
             FrameLayout
                 .LayoutParams(
                     FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    (MIN_TAP_TARGET_DP * dp).toInt(),
                     Gravity.TOP or Gravity.CENTER_HORIZONTAL,
                 ).apply {
                     // Initial position below the status bar; corrected by the
                     // insets listener once system bar insets are measured.
                     topMargin = (8 * dp).toInt()
                 }
-        container.addView(switchButton)
-        expandSwitchButtonTouchTarget(container)
+        container.addView(switchButtonSlot)
+        expandSwitchButtonTouchTarget()
         setContentView(container)
         applySystemBarContrast()
         installBridge()
@@ -227,9 +240,9 @@ class MainActivity : AppCompatActivity() {
             lastInsets = Insets.of(bars.left, bars.top, bars.right, bottom)
             // Push the floating switch button below the status bar so it doesn't
             // disappear under the notch/status icons on edge-to-edge layouts.
-            (switchButton.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+            (switchButtonSlot.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
                 lp.topMargin = bars.top + (8 * dp).toInt()
-                switchButton.layoutParams = lp
+                switchButtonSlot.layoutParams = lp
             }
             emitInsets()
             insets
@@ -547,17 +560,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Grow the pill's hit rect to the 48dp minimum tap target without changing
-     * how it looks. Only downward: upward would reach into the status bar and
-     * sideways would re-cover the web chrome beside the pill.
+     * Grow the pill's hit rect to fill its 48dp-tall slot without changing how
+     * the pill looks. The delegate lives on the slot, not on the root container:
+     * the full-screen WebView consumes touches before a root-level delegate is
+     * ever consulted. The slot only grows downward — upward would reach into the
+     * status bar and sideways would re-cover the web chrome beside the pill.
      */
-    private fun expandSwitchButtonTouchTarget(container: FrameLayout) {
-        val minHeight = (MIN_TAP_TARGET_DP * resources.displayMetrics.density).toInt()
-        switchButton.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-            val hitRect = Rect()
-            switchButton.getHitRect(hitRect)
-            if (hitRect.height() < minHeight) hitRect.bottom = hitRect.top + minHeight
-            container.touchDelegate = TouchDelegate(hitRect, switchButton)
+    private fun expandSwitchButtonTouchTarget() {
+        switchButtonSlot.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            val hitRect = Rect(0, 0, switchButtonSlot.width, switchButtonSlot.height)
+            switchButtonSlot.touchDelegate = TouchDelegate(hitRect, switchButton)
         }
     }
 
