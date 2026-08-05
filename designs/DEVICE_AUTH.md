@@ -354,4 +354,7 @@ stateless. This added invariant is the main thing for reviewers to scrutinize.
   single-use/expiry semantics already bound abuse in the meantime).
 - Applying the same delegated grant to other non-browser clients (the CLI could
   use it too, superseding the in-memory `_cli_tickets` store).
+- Non-human callers are covered separately by the client-credentials grant
+  (`designs/CLIENT_CREDENTIALS.md`), which reuses `mint_delegated_token` and the
+  same path allowlist for a machine principal with no consent step.
 - Per-scope consent granularity beyond the single "session APIs, no admin" scope.

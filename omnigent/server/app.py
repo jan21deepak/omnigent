@@ -2403,22 +2403,88 @@ def create_app(
         # See designs/DEVICE_AUTH.md.
         from omnigent.server.auth import env_var_is_truthy
 
-        if (
+        # Client-credentials grant (RFC 6749 §4.4): also opt-in and
+        # accounts-mode only, configured entirely by
+        # OMNIGENT_SERVICE_CLIENT_* so a headless process can authenticate
+        # as itself. Independent of the device grant — either, both, or
+        # neither may be configured — but the device router owns
+        # /oauth/token, so when it is mounted the confidential client is
+        # handed to it instead of mounting a second router on that path.
+        accounts_mode = (
+            isinstance(auth_provider, UnifiedAuthProvider) and auth_provider._source == "accounts"
+        )
+        service_client = None
+        if accounts_mode:
+            from omnigent.server.routes.client_credentials import ServiceClientConfig
+
+            assert isinstance(auth_provider, UnifiedAuthProvider)
+            accounts_config = auth_provider._accounts_config
+            if accounts_config is not None:
+                service_client = ServiceClientConfig.from_env(accounts_config.cookie_secret)
+
+        def _is_admin_identity(identity: str) -> bool:
+            return (
+                permission_store is not None and permission_store.is_admin(identity)
+            ) or admin_list.is_admin(identity)
+
+        if service_client is not None and _is_admin_identity(service_client.principal):
+            # The machine principal must be a distinct non-admin identity —
+            # otherwise its token would carry admin privilege inside every
+            # allowlisted path. Refuse to boot rather than issue it.
+            raise RuntimeError(
+                "OMNIGENT_SERVICE_CLIENT_PRINCIPAL must not be an admin identity "
+                f"(got {service_client.principal!r})."
+            )
+
+        device_grant_enabled = (
             env_var_is_truthy("OMNIGENT_DEVICE_GRANT_ENABLED", default=False)
-            and isinstance(auth_provider, UnifiedAuthProvider)
-            and auth_provider._source == "accounts"
+            and accounts_mode
             and permission_store is not None
-        ):
+        )
+
+        if device_grant_enabled:
             from omnigent.server.device_grant_store import DeviceGrantStore
             from omnigent.server.routes.device_auth import create_device_auth_router
 
+            assert isinstance(auth_provider, UnifiedAuthProvider)
+            assert permission_store is not None
             device_grant_store = DeviceGrantStore(permission_store.storage_location)
             auth_provider.set_grant_revocation_check(device_grant_store.is_revoked)
             app.include_router(
-                create_device_auth_router(auth_provider, device_grant_store),
+                create_device_auth_router(
+                    auth_provider,
+                    device_grant_store,
+                    service_client=service_client,
+                    is_admin=_is_admin_identity,
+                ),
                 tags=["oauth"],
             )
             _logger.info("device-grant: /oauth/* routes enabled")
+        elif service_client is not None:
+            from omnigent.server.routes.client_credentials import (
+                create_client_credentials_router,
+            )
+
+            assert isinstance(auth_provider, UnifiedAuthProvider)
+            assert auth_provider._accounts_config is not None
+            app.include_router(
+                create_client_credentials_router(
+                    service_client,
+                    auth_provider._accounts_config.cookie_secret,
+                    auth_provider._source,
+                    is_admin=_is_admin_identity,
+                ),
+                tags=["oauth"],
+            )
+
+        if service_client is not None:
+            _logger.info(
+                "client-credentials: /oauth/token accepts client %s as %s",
+                service_client.client_id,
+                service_client.principal,
+            )
+
+        if device_grant_enabled:
             # Multi-user server with a PUBLIC device-authorize endpoint: without
             # the shared client secret, anyone who can reach the server can
             # initiate a device flow, so the only phishing defense is the

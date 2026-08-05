@@ -46,7 +46,8 @@ RESERVED_USER_PUBLIC = "__public__"
 _RESERVED_USERS = frozenset({RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC})
 _TRUTHY_STRINGS = ("1", "true", "yes")
 
-# Path prefixes a delegated (device-grant) access token may reach.
+# Path prefixes a delegated access token — device grant or
+# client-credentials (machine) client — may reach.
 # Fail-closed allowlist: a token carrying a ``scope`` claim is rejected on
 # any path not covered here, so it can never touch admin / user-management
 # endpoints (``/auth/users``, ``/auth/invite``, ``/auth/setup`` …) even if
@@ -548,18 +549,24 @@ class UnifiedAuthProvider(AuthProvider):
         if not isinstance(user_id, str) or not user_id or user_id in _RESERVED_USERS:
             return None
 
-        # Delegated (device-grant) tokens carry a ``grant_id`` claim.
-        # They get two extra, request-scoped checks — a fail-closed path
-        # allowlist and a live revocation lookup — so they are never
-        # served from the plain user-id cache (which would skip both).
+        # Delegated tokens carry a ``scope`` claim — device-grant tokens
+        # also carry the ``grant_id`` they were issued from, machine
+        # (client-credentials) tokens carry none. Both get the fail-closed
+        # path allowlist, and a device-grant token additionally gets a live
+        # revocation lookup, so neither is ever served from the plain
+        # user-id cache (which would skip both checks).
+        scope = payload.get("scope")
         grant_id = payload.get("grant_id")
-        if grant_id is not None:
-            if not isinstance(grant_id, str):
+        if scope is not None or grant_id is not None:
+            if not isinstance(scope, str) or not scope:
                 return None
             if not delegated_path_allowed(request.url.path):
                 return None
-            if self._grant_revoked is not None and self._grant_revoked(grant_id):
-                return None
+            if grant_id is not None:
+                if not isinstance(grant_id, str):
+                    return None
+                if self._grant_revoked is not None and self._grant_revoked(grant_id):
+                    return None
             return user_id
 
         # Cache for remaining lifetime of the token.
