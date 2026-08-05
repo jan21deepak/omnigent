@@ -1178,13 +1178,9 @@ class HostProcess:
                     proc = subprocess.Popen(
                         [sys.executable, "-m", "omnigent.runner._entry"],
                         env=env,
-                        # Start the runner in its verified session workspace
-                        # instead of inheriting the daemon's cwd. A long-lived
-                        # daemon is often launched from a directory that later
-                        # disappears (temp checkout, removed worktree, deleted
-                        # sandbox); once that cwd is gone every Path.cwd() in the
-                        # runner raises FileNotFoundError and native terminal
-                        # creation dies before the harness ever launches.
+                        # Start the runner in its verified workspace, not the
+                        # daemon's inherited cwd: that dir may already be gone,
+                        # making every Path.cwd() in the runner raise.
                         cwd=str(workspace),
                         # Runners are WS-tunnel clients with no interactive input.
                         # Give them a clean /dev/null stdin instead of inheriting the
