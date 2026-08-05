@@ -44,6 +44,7 @@ import hmac
 import logging
 import os
 import secrets
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -53,6 +54,7 @@ from starlette.responses import JSONResponse, Response
 
 from omnigent.server.auth import RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC
 from omnigent.server.device_grant_store import hash_secret
+from omnigent.server.routes.rate_limit import RATE_LIMITER_MAX_KEYS, SlidingWindowRateLimiter
 
 _logger = logging.getLogger(__name__)
 
@@ -150,6 +152,21 @@ def _resolve_ttl() -> int:
     return max(_MIN_TOKEN_TTL_SECONDS, min(ttl, _MAX_TOKEN_TTL_SECONDS))
 
 
+# The token endpoint is reachable unauthenticated (the client's secret *is*
+# the authentication), so failed attempts are throttled per source IP to keep
+# the secret out of reach of an online guessing attack. Only failures are
+# charged: a legitimate client fetching a token every TTL never trips it.
+_FAILED_AUTH_MAX = 10  # failed attempts…
+_FAILED_AUTH_WINDOW_SECONDS = 60  # …per source IP per this window.
+_failed_auth = SlidingWindowRateLimiter(
+    _FAILED_AUTH_MAX, _FAILED_AUTH_WINDOW_SECONDS, RATE_LIMITER_MAX_KEYS
+)
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
 def _basic_auth_credentials(request: Request) -> tuple[str, str] | None:
     """Return ``(client_id, client_secret)`` from an HTTP Basic header.
 
@@ -193,6 +210,11 @@ def handle_client_credentials_grant(
     """
     from omnigent.server.routes.device_auth import mint_delegated_token
 
+    now = time.time()
+    source = _client_ip(request)
+    if _failed_auth.exhausted(source, now):
+        return JSONResponse(status_code=429, content={"error": "slow_down"})
+
     basic = _basic_auth_credentials(request)
     if basic is not None:
         client_id, client_secret = basic
@@ -209,6 +231,7 @@ def handle_client_credentials_grant(
     )
     secret_ok = service_client.secret_matches(client_secret, cookie_secret)
     if not (id_ok and secret_ok):
+        _failed_auth.record(source, now)
         _logger.warning("oauth/token: client_credentials authentication failed")
         return JSONResponse(status_code=401, content={"error": "invalid_client"})
 

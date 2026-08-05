@@ -13,7 +13,7 @@ Two layers:
 from __future__ import annotations
 
 import base64
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import httpx
@@ -21,7 +21,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from omnigent.server.device_grant_store import hash_secret
+from omnigent.server.routes import client_credentials
 from omnigent.server.routes.client_credentials import ServiceClientConfig
+from omnigent.server.routes.rate_limit import SlidingWindowRateLimiter
 from tests.server.test_device_auth import _build_accounts_app
 
 _KEY = b"k" * 32
@@ -102,6 +104,22 @@ def test_config_clamps_ttl(
 
 
 # ── Token endpoint (integration) ──────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def fresh_failed_auth_budget(monkeypatch: pytest.MonkeyPatch) -> Callable[[], None]:
+    """Give each test its own failed-attempt budget (the limiter is a module
+    global keyed by source IP, which every TestClient shares)."""
+
+    def reset() -> None:
+        monkeypatch.setattr(
+            client_credentials,
+            "_failed_auth",
+            SlidingWindowRateLimiter(client_credentials._FAILED_AUTH_MAX, 60, 100),
+        )
+
+    reset()
+    return reset
 
 
 @pytest.fixture
@@ -212,6 +230,23 @@ def test_client_credentials_rejects_bad_credentials(
     r = _request_token(app_client_only, client_id=client_id, client_secret=client_secret)
     assert r.status_code == 401
     assert r.json()["error"] == "invalid_client"
+
+
+def test_client_credentials_throttles_failed_attempts(
+    app_client_only: TestClient, fresh_failed_auth_budget: Callable[[], None]
+) -> None:
+    """The secret is the only thing guarding the endpoint, so online guessing
+    is capped per source IP — and a correct client is not collateral."""
+    for _ in range(client_credentials._FAILED_AUTH_MAX):
+        assert _request_token(app_client_only, client_secret="guess").status_code == 401
+    r = _request_token(app_client_only, client_secret="guess")
+    assert r.status_code == 429
+    assert r.json()["error"] == "slow_down"
+
+    # Only failures are charged, so a correct client never trips the budget.
+    fresh_failed_auth_budget()
+    for _ in range(client_credentials._FAILED_AUTH_MAX + 5):
+        assert _request_token(app_client_only).status_code == 200
 
 
 def test_client_credentials_requires_credentials(app_client_only: TestClient) -> None:
