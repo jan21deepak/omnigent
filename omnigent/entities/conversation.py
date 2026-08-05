@@ -745,8 +745,8 @@ class ConversationItem(BaseModel):
         """
         Render the item as the flat, JSON-safe shape defined by API.md.
 
-        Common fields (``id``, ``response_id``, ``type``, ``status``)
-        come from the item; type-specific fields (``role``,
+        Common fields (``id``, ``response_id``, ``type``, ``status``,
+        ``created_at``) come from the item; type-specific fields (``role``,
         ``content``, ``model``, ``name``, ``arguments``, …) come
         from ``self.data`` and are spread onto the top level.
         ``exclude_none=True`` drops absent optional fields (e.g.
@@ -764,6 +764,7 @@ class ConversationItem(BaseModel):
 
             {"id": "msg_abc", "response_id": "resp_xyz",
              "type": "message", "status": "completed",
+             "created_at": 1700000000,
              "role": "assistant",
              "content": [{"type": "output_text", "text": "hi"}],
              "model": "databricks-gpt-5-4"}
@@ -773,6 +774,7 @@ class ConversationItem(BaseModel):
             "response_id": self.response_id,
             "type": self.type,
             "status": self.status,
+            "created_at": self.created_at,
             **self.data.model_dump(exclude_none=True, by_alias=True),
             # created_by is present only for human-authored items;
             # omitted (not null) for agent/tool/system messages so the
