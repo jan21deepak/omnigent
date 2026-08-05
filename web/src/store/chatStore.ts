@@ -3855,8 +3855,12 @@ function anchorKeyForSend(
   if (lastPending) return lastPending.tempId;
   if (blocks.length === 0) return null;
   for (let i = blocks.length - 1; i >= 0; i -= 1) {
-    const key = blockAnchorKey(blocks[i]!);
-    if (key !== undefined) return key;
+    const b = blocks[i]!;
+    // Skip only non-rendering lifecycle markers. An unfinalized streaming
+    // block still holds a screen position, so anchor to it (its missing id
+    // yields undefined = tail append) rather than jumping the older reply.
+    if (b.type === "response_start" || b.type === "response_end") continue;
+    return blockAnchorKey(b);
   }
   return undefined;
 }

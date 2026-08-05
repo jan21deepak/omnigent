@@ -2259,6 +2259,35 @@ describe("chatStore — send while streaming (queueing)", () => {
     await sendDone;
   });
 
+  it("tail-appends a send while an in-flight reply is streaming after an earlier turn", async () => {
+    // Newest block is an unfinalized chunk of turn 2's reply; the scan must
+    // stop there (undefined → tail append), not walk back to turn 1's user
+    // message and drop the new message above the whole turn-2 reply.
+    const mkBlock = (type: AnyBlock["type"], itemId: string | null, extra: object): AnyBlock =>
+      ({
+        type,
+        ctx: { agent: null, depth: 0, turn: 0, timestamp: 0, responseId: "resp_2", itemId },
+        ...extra,
+      }) as AnyBlock;
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      abortController: new AbortController(),
+      status: "streaming",
+      activeResponse: { responseId: "resp_2", state: "streaming", error: null },
+      blocks: [
+        mkBlock("user_message", "msg_a", { content: [{ type: "input_text", text: "A" }] }),
+        mkBlock("text_done", "msg_r1", { fullText: "reply 1", hasCodeBlocks: false }),
+        mkBlock("response_end", null, { status: "completed" }),
+        mkBlock("user_message", "msg_b", { content: [{ type: "input_text", text: "B" }] }),
+        mkBlock("text_chunk", null, { text: "reply 2 so far" }),
+      ],
+    });
+
+    const sendDone = useChatStore.getState().send("C", "agent_xyz");
+    expect(useChatStore.getState().pendingUserMessages.at(-1)!.anchorAfterKey).toBeUndefined();
+    await sendDone;
+  });
+
   it("rolls back the pending entry when the queue POST fails", async () => {
     useChatStore.setState({
       conversationId: "conv_abc",
