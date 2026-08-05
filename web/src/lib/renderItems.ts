@@ -301,6 +301,11 @@ function reusablePrefix(
     return null;
   }
   const startBlock = cache.lastBubbleStart;
+  // Never resume a walk AT a routing-decision chip. A later reply delta
+  // for the same response turns that standalone chip into a mid-reply card
+  // that must hoist above the reply — but the top-level rewalk would re-emit
+  // it standalone and split the reply. Rebuild from scratch instead.
+  if (blocks[startBlock]?.type === "routing_decision") return null;
   // The new array must be at least as long, and the finalized prefix
   // region must be byte-for-byte (reference-for-reference) unchanged.
   if (blocks.length < startBlock) return null;
@@ -339,6 +344,41 @@ function reusablePrefix(
     }
   }
   return { prefix, startBlock };
+}
+
+type RoutingDecisionBlockT = Extract<AnyBlock, { type: "routing_decision" }>;
+
+/** Build the standalone muted routing-decision chip bubble. */
+function routingDecisionBubble(b: RoutingDecisionBlockT, index: number): Bubble {
+  return {
+    kind: "routing_decision",
+    itemId: b.ctx.itemId ?? `routing_${index}`,
+    model: b.model,
+    applied: b.applied,
+    rationale: b.rationale,
+    ...(b.agent !== undefined && { agent: b.agent }),
+  };
+}
+
+/**
+ * Whether the SAME assistant response continues after a routing-decision
+ * chip encountered mid-scan. Used to decide if the chip lands inside the
+ * current reply (late card → hoist it above and keep the reply one bubble)
+ * or begins the next turn's reply (keep it as a group boundary). Skips
+ * lifecycle markers and adjacent chips; a user/compaction boundary or a
+ * different response id means the chip does NOT belong to this reply.
+ */
+function sameResponseContinuesAfter(blocks: AnyBlock[], from: number, responseId: string): boolean {
+  for (let j = from; j < blocks.length; j += 1) {
+    const b = blocks[j]!;
+    if (b.type === "response_start" || b.type === "response_end") continue;
+    if (b.type === "routing_decision") continue;
+    if (b.type === "user_message" || b.type === "compaction" || b.type === "compaction_loading") {
+      return false;
+    }
+    return b.ctx.responseId === responseId;
+  }
+  return false;
 }
 
 /**
@@ -382,6 +422,12 @@ function walkBubbles(
   }
   // Block index where the most recently pushed bubble's group started.
   let lastBubbleStart = bubbles.length > 0 ? 0 : -1;
+  // Whether the most recently pushed assistant group hoisted a mid-reply
+  // routing chip above itself (emitting >1 bubble in one step). The
+  // incremental cache reuses all-but-the-last bubble and rewalks from
+  // `lastBubbleStart`; a hoisted chip in the FINAL group breaks that
+  // one-bubble assumption, so we disable reuse for the next call.
+  let lastGroupHoisted = false;
   let i = startIndex;
 
   while (i < blocks.length) {
@@ -396,6 +442,7 @@ function walkBubbles(
 
     if (b.type === "user_message") {
       lastBubbleStart = i;
+      lastGroupHoisted = false;
       bubbles.push({
         kind: "user",
         itemId: b.ctx.itemId ?? `user_${i}`,
@@ -411,6 +458,7 @@ function walkBubbles(
 
     if (b.type === "compaction_loading") {
       lastBubbleStart = i;
+      lastGroupHoisted = false;
       bubbles.push({
         kind: "compaction_loading",
         itemId: b.ctx.itemId ?? `compaction_loading_${i}`,
@@ -431,6 +479,7 @@ function walkBubbles(
         }
       }
       lastBubbleStart = i;
+      lastGroupHoisted = false;
       bubbles.push({
         kind: "compaction",
         itemId: b.ctx.itemId ?? `compaction_${i}`,
@@ -443,14 +492,8 @@ function walkBubbles(
       // Standalone muted chip at its transcript position (turn start),
       // never folded into an adjacent assistant bubble.
       lastBubbleStart = i;
-      bubbles.push({
-        kind: "routing_decision",
-        itemId: b.ctx.itemId ?? `routing_${i}`,
-        model: b.model,
-        applied: b.applied,
-        rationale: b.rationale,
-        ...(b.agent !== undefined && { agent: b.agent }),
-      });
+      lastGroupHoisted = false;
+      bubbles.push(routingDecisionBubble(b, i));
       i += 1;
       continue;
     }
@@ -462,6 +505,10 @@ function walkBubbles(
     // close the bubble.
     const groupResponseId = b.ctx.responseId;
     const groupStart = i;
+    // Routing chips that land mid-reply (a late routing-decision card):
+    // hoisted above the reply so the response renders as ONE bubble with
+    // the chip on top, instead of splitting into two streaming bubbles.
+    const hoistedRouting: { block: RoutingDecisionBlockT; index: number }[] = [];
     while (i < blocks.length) {
       const cur = blocks[i]!;
       // Break on boundaries that start a new top-level bubble. Include
@@ -472,10 +519,17 @@ function walkBubbles(
       if (
         cur.type === "user_message" ||
         cur.type === "compaction" ||
-        cur.type === "compaction_loading" ||
-        cur.type === "routing_decision"
+        cur.type === "compaction_loading"
       )
         break;
+      if (cur.type === "routing_decision") {
+        // A chip that begins the NEXT turn's reply stays a boundary; one
+        // whose own reply continues after it is a late card — hoist it.
+        if (!sameResponseContinuesAfter(blocks, i + 1, groupResponseId)) break;
+        hoistedRouting.push({ block: cur, index: i });
+        i += 1;
+        continue;
+      }
       if (cur.type === "response_start" || cur.type === "response_end") {
         i += 1;
         continue;
@@ -486,10 +540,17 @@ function walkBubbles(
       if (cur.ctx.responseId !== groupResponseId && cur.type !== "tool_result") break;
       i += 1;
     }
+    // A hoisted late card renders above the reply regardless of whether the
+    // reply itself produces a bubble.
+    for (const h of hoistedRouting) bubbles.push(routingDecisionBubble(h.block, h.index));
     const groupBlocks = blocks.slice(groupStart, i).filter(isAssistantSideBlock);
     // A group of only tool_results renders nothing itself — skip it so
     // an orphan late output doesn't paint an empty assistant bubble.
     if (groupBlocks.length > 0 && groupBlocks.every((bk) => bk.type === "tool_result")) {
+      if (hoistedRouting.length > 0) {
+        lastBubbleStart = groupStart;
+        lastGroupHoisted = true;
+      }
       continue;
     }
     const lifecycle =
@@ -509,6 +570,7 @@ function walkBubbles(
     const stableId = firstItemId ?? `${groupResponseId}:${subIndex}`;
 
     lastBubbleStart = groupStart;
+    lastGroupHoisted = hoistedRouting.length > 0;
     bubbles.push({
       kind: "assistant",
       responseId: groupResponseId,
@@ -518,6 +580,11 @@ function walkBubbles(
       items: buildAssistantItems(groupBlocks, lifecycle, crossBubbleResults),
     });
   }
+
+  // A hoisted chip in the final group emitted >1 bubble in one step, which
+  // the incremental cache's drop-last-and-rewalk reuse can't reconstruct
+  // without duplicating the chip. Signal a full rebuild next call.
+  if (lastGroupHoisted) lastBubbleStart = -1;
 
   return { bubbles, lastBubbleStart };
 }

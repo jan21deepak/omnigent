@@ -4231,6 +4231,101 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       expect(state.blocks).toHaveLength(1);
       expect((state.blocks[0] as UserMessageBlock).ctx.itemId).toBe("msg_hi");
     });
+
+    it("inserts the promoted block at its wire position (anchorIndex), not the tail", () => {
+      // Smart-routing live-order regression: a routing card and the first
+      // reply deltas commit WHILE the user message is still optimistic.
+      // The pending entry recorded anchorIndex=0 (no committed blocks at
+      // send time), so promotion inserts the user_message at index 0 —
+      // above the card and reply — instead of appending below them.
+      const routingCard: AnyBlock = {
+        type: "routing_decision",
+        ctx: {
+          agent: null,
+          depth: 0,
+          turn: 0,
+          timestamp: 0,
+          responseId: "resp_1",
+          itemId: "routing_1",
+        },
+        model: "gpt",
+        applied: true,
+        rationale: "chose gpt",
+      };
+      const replyDelta: AnyBlock = {
+        type: "text_done",
+        ctx: {
+          agent: null,
+          depth: 0,
+          turn: 0,
+          timestamp: 0,
+          responseId: "resp_1",
+          itemId: "msg_asst",
+        },
+        fullText: "hello",
+        hasCodeBlocks: false,
+      };
+      useChatStore.setState({
+        blocks: [routingCard, replyDelta],
+        pendingUserMessages: [
+          { tempId: "pend_1", content: [{ type: "input_text", text: "hi" }], anchorIndex: 0 },
+        ],
+      });
+
+      handleSessionEvent({
+        type: "session_input_consumed",
+        itemId: "msg_user",
+        itemType: "message",
+        data: { role: "user", content: [{ type: "input_text", text: "hi" }] },
+      });
+
+      const state = useChatStore.getState();
+      // user_message first, then the card and reply that raced ahead of it.
+      expect(state.blocks).toHaveLength(3);
+      expect((state.blocks[0] as UserMessageBlock).type).toBe("user_message");
+      expect(state.blocks[0]!.ctx.itemId).toBe("msg_user");
+      expect(state.blocks[1]).toBe(routingCard);
+      expect(state.blocks[2]).toBe(replyDelta);
+      expect(state.pendingUserMessages).toEqual([]);
+    });
+
+    it("clears the optimistic entry even when the item already committed (stranding race)", () => {
+      // Snapshot/relay won the race: the committed user_message is already
+      // in `blocks` before the consumed event lands. The handler must still
+      // drop the matching pending entry, or the optimistic bubble strands at
+      // the bottom of the transcript forever.
+      const committed: UserMessageBlock = {
+        type: "user_message",
+        ctx: {
+          agent: null,
+          depth: 0,
+          turn: 0,
+          timestamp: 0,
+          responseId: "",
+          itemId: "msg_committed",
+        },
+        content: [{ type: "input_text", text: "hi" }],
+      };
+      useChatStore.setState({
+        blocks: [committed],
+        pendingUserMessages: [
+          { tempId: "pend_1", content: [{ type: "input_text", text: "hi" }], anchorIndex: 0 },
+        ],
+      });
+
+      handleSessionEvent({
+        type: "session_input_consumed",
+        itemId: "msg_committed",
+        itemType: "message",
+        clearedPendingId: "pend_1",
+        data: { role: "user", content: [{ type: "input_text", text: "hi" }] },
+      });
+
+      const state = useChatStore.getState();
+      // No duplicate block appended, and the stranded pending entry is gone.
+      expect(state.blocks).toEqual([committed]);
+      expect(state.pendingUserMessages).toEqual([]);
+    });
   });
 
   describe("slash_command (claude-native skill / surfaced command)", () => {
