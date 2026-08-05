@@ -40,7 +40,10 @@ const { registerLocalhostCors } = require("./localhost_cors");
 const { normalizeUrl, expandDatabricksWorkspaceUrl } = require("./url");
 const { parseOmnigentDeepLink, chooseDeepLinkStrategy } = require("./deepLink");
 const { registerWorkspaceChromeHide } = require("./workspace-chrome");
-const { createBrowserViewRegistry } = require("./browserViewRegistry");
+const {
+  createBrowserViewRegistry,
+  resetOverlaySuppressionOnNavigation,
+} = require("./browserViewRegistry");
 const { createBrowserViewBoundsController } = require("./browserViewBounds");
 const { registerBrowserIpc } = require("./browserIpc");
 const { registerSessionExpiryReload } = require("./session-expiry");
@@ -1995,7 +1998,7 @@ function isPinnedOriginSender(event) {
  * @returns {ReturnType<typeof createBrowserViewRegistry>}
  */
 function createBrowserRegistryForWindow(win) {
-  return createBrowserViewRegistry({
+  const registry = createBrowserViewRegistry({
     WebContentsViewCtor: (opts) => new WebContentsView(opts),
     createBoundsController: createBrowserViewBoundsController,
     attachToHost: (view) => win.contentView.addChildView(view),
@@ -2017,6 +2020,12 @@ function createBrowserRegistryForWindow(win) {
       }
     },
   });
+  try {
+    resetOverlaySuppressionOnNavigation(win.webContents, registry);
+  } catch {
+    /* window torn down */
+  }
+  return registry;
 }
 
 /**

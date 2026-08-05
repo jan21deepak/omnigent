@@ -33,10 +33,9 @@ function createBrowserViewRegistry({
 } = {}) {
   const entries = new Map(); // conversationId -> BrowserViewEntry
   let activeConversationId = null;
-  // While true the active view is detached from the host window even though it
-  // stays "active". The native view is a sibling of the renderer's view and
-  // always paints above the whole DOM, so a renderer overlay (dialog, lightbox,
-  // toast) can only be seen while the view is off the host.
+  // While true the active view is detached from the host even though it stays
+  // "active": the native view paints above the whole DOM, so a renderer overlay
+  // is only visible while the view is off the host.
   let overlaySuppressed = false;
 
   // Attach the entry's view unless an overlay is currently suppressing paint.
@@ -364,7 +363,24 @@ function createBrowserViewRegistry({
   };
 }
 
+/**
+ * Clear overlay suppression when the host renderer does a real document
+ * navigation (reload / server switch): its ref count is module state and dies
+ * with the page, so outstanding leases are never released. In-place (SPA route)
+ * navigations keep their leases, so they must not clear it.
+ *
+ * @param {{ on: (event: string, handler: Function) => void }} hostWebContents
+ * @param {{ setOverlaySuppressed: (suppressed: boolean) => unknown }} registry
+ */
+function resetOverlaySuppressionOnNavigation(hostWebContents, registry) {
+  if (!hostWebContents || typeof hostWebContents.on !== "function") return;
+  hostWebContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+    if (isMainFrame && !isInPlace) registry.setOverlaySuppressed(false);
+  });
+}
+
 module.exports = {
   createBrowserViewRegistry,
+  resetOverlaySuppressionOnNavigation,
   DEFAULT_CAP,
 };
