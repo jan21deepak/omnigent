@@ -6,11 +6,13 @@ import android.app.DownloadManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.view.Gravity
+import android.view.TouchDelegate
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -162,7 +164,6 @@ class MainActivity : AppCompatActivity() {
         switchButton =
             TextView(this).apply {
                 text = hostLabelOf(serverUrl)
-                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.brand_foreground))
                 isClickable = true
                 isFocusable = true
                 setOnClickListener { showServerSwitcherMenu(it) }
@@ -174,10 +175,12 @@ class MainActivity : AppCompatActivity() {
                     FrameLayout.LayoutParams.WRAP_CONTENT,
                     Gravity.TOP or Gravity.CENTER_HORIZONTAL,
                 )
-        // Density-dependent metrics (text/padding/elevation/background/top
-        // margin) are all set here so a runtime density change can rebuild them.
+        // Density- and theme-dependent metrics (text/colour/padding/elevation/
+        // background/top margin) are set here so a runtime density or dark/light
+        // change can rebuild them.
         applyPillMetrics()
         container.addView(switchButton)
+        expandSwitchButtonTouchTarget(container)
         setContentView(container)
         applySystemBarContrast()
         installBridge()
@@ -290,17 +293,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Apply the server-switcher pill's density-dependent metrics from the
-     * *current* display density. Idempotent and safe to re-run after a runtime
-     * Display-size change so text, padding, elevation, background and top margin
-     * all track the new density (the insets listener recomputes the margin when
-     * insets are re-requested).
+     * Apply the server-switcher pill's configuration-dependent metrics from the
+     * *current* resources. Idempotent and safe to re-run after a runtime
+     * Display-size or dark/light change so text, padding, elevation, background,
+     * foreground colour and top margin all track the new density and theme (the
+     * insets listener recomputes the margin when insets are re-requested).
      */
     private fun applyPillMetrics() {
         val dp = resources.displayMetrics.density
         (switchButton as TextView).apply {
             background =
                 ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_floating_switch)
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.brand_foreground))
             textSize = 12f
             setPadding((12 * dp).toInt(), (6 * dp).toInt(), (12 * dp).toInt(), (6 * dp).toInt())
             elevation = 6 * dp
@@ -568,6 +572,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Grow the pill's hit rect to the 48dp minimum tap target without changing
+     * how it looks. Only downward: upward would reach into the status bar and
+     * sideways would re-cover the web chrome beside the pill.
+     */
+    private fun expandSwitchButtonTouchTarget(container: FrameLayout) {
+        val minHeight = (MIN_TAP_TARGET_DP * resources.displayMetrics.density).toInt()
+        switchButton.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            val hitRect = Rect()
+            switchButton.getHitRect(hitRect)
+            if (hitRect.height() < minHeight) hitRect.bottom = hitRect.top + minHeight
+            container.touchDelegate = TouchDelegate(hitRect, switchButton)
+        }
+    }
+
+    /**
      * Show the server-switcher dropdown menu, mirroring the iOS `ServerSwitcher`
      * `Menu`. Lists the current server (disabled header), other recent servers,
      * Reload, and Connect to New Server. Tapping a recent server switches
@@ -805,6 +824,9 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val MAX_LOGIN_ATTEMPTS = 3
+
+        // Android's recommended minimum interactive target size.
+        const val MIN_TAP_TARGET_DP = 48
 
         // Back-press fallback: long enough that a healthy renderer's JS round-trip
         // (a few ms) always wins the race, short enough to not feel stuck if it
