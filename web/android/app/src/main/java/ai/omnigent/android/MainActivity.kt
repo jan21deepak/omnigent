@@ -161,16 +161,9 @@ class MainActivity : AppCompatActivity() {
         // (values/values-night colors.xml) so it adapts to light/dark mode.
         val container = FrameLayout(this)
         container.addView(webView)
-        val dp = resources.displayMetrics.density
         switchButton =
             TextView(this).apply {
                 text = hostLabelOf(serverUrl)
-                background =
-                    ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_floating_switch)
-                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.brand_foreground))
-                textSize = 12f
-                setPadding((12 * dp).toInt(), (6 * dp).toInt(), (12 * dp).toInt(), (6 * dp).toInt())
-                elevation = 6 * dp
                 isClickable = true
                 isFocusable = true
                 setOnClickListener { showServerSwitcherMenu(it) }
@@ -181,11 +174,11 @@ class MainActivity : AppCompatActivity() {
                     FrameLayout.LayoutParams.WRAP_CONTENT,
                     FrameLayout.LayoutParams.WRAP_CONTENT,
                     Gravity.TOP or Gravity.CENTER_HORIZONTAL,
-                ).apply {
-                    // Initial position below the status bar; corrected by the
-                    // insets listener once system bar insets are measured.
-                    topMargin = (8 * dp).toInt()
-                }
+                )
+        // Density- and theme-dependent metrics (text/colour/padding/elevation/
+        // background/top margin) are set here so a runtime density or dark/light
+        // change can rebuild them.
+        applyPillMetrics()
         container.addView(switchButton)
         expandSwitchButtonTouchTarget(container)
         setContentView(container)
@@ -228,7 +221,7 @@ class MainActivity : AppCompatActivity() {
             // Push the floating switch button below the status bar so it doesn't
             // disappear under the notch/status icons on edge-to-edge layouts.
             (switchButton.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
-                lp.topMargin = bars.top + (8 * dp).toInt()
+                lp.topMargin = bars.top + (8 * resources.displayMetrics.density).toInt()
                 switchButton.layoutParams = lp
             }
             emitInsets()
@@ -286,9 +279,41 @@ class MainActivity : AppCompatActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         applySystemBarContrast()
+        if (::switchButton.isInitialized) {
+            // A Display-size change is delivered here (density is in the
+            // manifest's configChanges), so re-derive the pill's density-scaled
+            // metrics and re-request insets to recompute its top margin.
+            applyPillMetrics()
+            ViewCompat.requestApplyInsets(webView)
+        }
         if (::webView.isInitialized) {
             // Notify matchMedia listeners without reloading the SPA.
             webView.dispatchConfigurationChanged(newConfig)
+        }
+    }
+
+    /**
+     * Apply the server-switcher pill's configuration-dependent metrics from the
+     * *current* resources. Idempotent and safe to re-run after a runtime
+     * Display-size or dark/light change so text, padding, elevation, background,
+     * foreground colour and top margin all track the new density and theme (the
+     * insets listener recomputes the margin when insets are re-requested).
+     */
+    private fun applyPillMetrics() {
+        val dp = resources.displayMetrics.density
+        (switchButton as TextView).apply {
+            background =
+                ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_floating_switch)
+            setTextColor(ContextCompat.getColor(this@MainActivity, R.color.brand_foreground))
+            textSize = 12f
+            setPadding((12 * dp).toInt(), (6 * dp).toInt(), (12 * dp).toInt(), (6 * dp).toInt())
+            elevation = 6 * dp
+        }
+        (switchButton.layoutParams as? FrameLayout.LayoutParams)?.let { lp ->
+            // Initial position below the status bar; corrected by the insets
+            // listener once system bar insets are measured.
+            lp.topMargin = (8 * dp).toInt()
+            switchButton.layoutParams = lp
         }
     }
 
