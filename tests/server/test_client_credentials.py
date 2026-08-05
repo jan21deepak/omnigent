@@ -243,7 +243,7 @@ def test_client_credentials_throttles_failed_attempts(
     assert r.status_code == 429
     assert r.json()["error"] == "slow_down"
 
-    # Only failures are charged, so a correct client never trips the budget.
+    # Only failures are charged, so a correct client never spends the budget.
     fresh_failed_auth_budget()
     for _ in range(client_credentials._FAILED_AUTH_MAX + 5):
         assert _request_token(app_client_only).status_code == 200

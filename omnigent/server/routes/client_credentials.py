@@ -152,10 +152,8 @@ def _resolve_ttl() -> int:
     return max(_MIN_TOKEN_TTL_SECONDS, min(ttl, _MAX_TOKEN_TTL_SECONDS))
 
 
-# The token endpoint is reachable unauthenticated (the client's secret *is*
-# the authentication), so failed attempts are throttled per source IP to keep
-# the secret out of reach of an online guessing attack. Only failures are
-# charged: a legitimate client fetching a token every TTL never trips it.
+# The client's secret *is* the authentication here, so failed attempts are
+# throttled to blunt online guessing. Only failures are charged.
 _FAILED_AUTH_MAX = 10  # failed attempts…
 _FAILED_AUTH_WINDOW_SECONDS = 60  # …per source IP per this window.
 _failed_auth = SlidingWindowRateLimiter(
@@ -164,6 +162,14 @@ _failed_auth = SlidingWindowRateLimiter(
 
 
 def _client_ip(request: Request) -> str:
+    """Throttle key: the socket peer, as the device grant's limiter uses.
+
+    Behind a reverse proxy every request presents the proxy's address, so
+    the budget is effectively global there — the throttle is a coarse
+    backstop, not per-caller fairness. Honouring ``X-Forwarded-For`` without
+    a trusted-proxy configuration would be worse: a spoofed header would let
+    a guesser mint a fresh budget per request.
+    """
     return request.client.host if request.client else "unknown"
 
 

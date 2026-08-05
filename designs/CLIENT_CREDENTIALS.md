@@ -63,9 +63,15 @@ No refresh token (RFC 6749 §4.4.3): the token is short-lived and the client
 re-presents its secret. The secret is compared in constant time against the
 stored digest; a mismatch is `401 invalid_client`. Since the secret is the
 only thing guarding the endpoint, failed attempts are throttled per source IP
-(10 per minute, then `429 slow_down`) to put online guessing out of reach.
-Only failures are charged, so a client fetching a token each TTL is never
-collateral.
+(10 per minute, then `429 slow_down`) to blunt online guessing. Only failures
+are charged, so a client fetching a token each TTL never spends the budget.
+
+The key is the socket peer, as in the device grant's limiter: behind a reverse
+proxy every request presents the proxy's address, so the budget is effectively
+global there. That is a coarse backstop rather than per-caller fairness, and
+deliberately so — honouring `X-Forwarded-For` without a trusted-proxy
+configuration would let a guesser spoof a fresh budget per request. Deployments
+that want per-caller throttling should rate-limit at the proxy.
 
 ### Reuse of the delegated machinery
 
