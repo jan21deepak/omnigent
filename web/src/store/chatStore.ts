@@ -3841,16 +3841,24 @@ function blockMatchesAnchorKey(b: AnyBlock, key: string): boolean {
 }
 
 /**
- * The `anchorAfterKey` for a message being sent: the preceding optimistic
- * message's `tempId` when one is still pending (chaining keeps sibling order
- * across promotions), else the last committed block's identity, else `null`
- * for an empty transcript (insert at the head).
+ * The `anchorAfterKey` for a message being sent: the preceding pending
+ * message's `tempId` when one is still optimistic (chaining keeps sibling
+ * order across promotions), else the nearest identifiable block's identity.
+ * `null` (empty transcript) inserts at the head; `undefined` (only ephemeral
+ * blocks, e.g. mid-stream chunks) tail-appends rather than jumping to the top.
  */
-function anchorKeyForSend(pending: PendingUserMessage[], blocks: AnyBlock[]): string | null {
+function anchorKeyForSend(
+  pending: PendingUserMessage[],
+  blocks: AnyBlock[],
+): string | null | undefined {
   const lastPending = pending[pending.length - 1];
   if (lastPending) return lastPending.tempId;
-  const lastBlock = blocks[blocks.length - 1];
-  return lastBlock ? (blockAnchorKey(lastBlock) ?? null) : null;
+  if (blocks.length === 0) return null;
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    const key = blockAnchorKey(blocks[i]!);
+    if (key !== undefined) return key;
+  }
+  return undefined;
 }
 
 /**

@@ -2227,6 +2227,38 @@ describe("chatStore — send while streaming (queueing)", () => {
     expect(state.blocks.filter((b) => b.type === "user_message")).toHaveLength(0);
   });
 
+  it("tail-appends (not head-inserts) a send while only ephemeral blocks are on screen", async () => {
+    // Mid-stream the newest block is an unfinalized chunk with itemId=null.
+    // The send anchor must be `undefined` (tail append), not `null` (which
+    // insertUserBlockAtAnchor treats as head-insert and would fling the
+    // message above the entire earlier transcript once it commits).
+    const streamingChunk: AnyBlock = {
+      type: "text_chunk",
+      ctx: {
+        agent: null,
+        depth: 0,
+        turn: 0,
+        timestamp: 0,
+        responseId: "resp_in_flight",
+        itemId: null,
+      },
+      text: "partial reply",
+    };
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      abortController: new AbortController(),
+      status: "streaming",
+      activeResponse: { responseId: "resp_in_flight", state: "streaming", error: null },
+      blocks: [streamingChunk],
+    });
+
+    const sendDone = useChatStore.getState().send("later", "agent_xyz");
+    // anchorAfterKey is computed synchronously before any network work.
+    const pending = useChatStore.getState().pendingUserMessages;
+    expect(pending.at(-1)!.anchorAfterKey).toBeUndefined();
+    await sendDone;
+  });
+
   it("rolls back the pending entry when the queue POST fails", async () => {
     useChatStore.setState({
       conversationId: "conv_abc",
