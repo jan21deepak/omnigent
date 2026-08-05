@@ -357,6 +357,22 @@ def test_shell_tools_override() -> None:
     assert policy(_sh("cd /etc")) is None
 
 
+@pytest.mark.parametrize(
+    "tool",
+    ["sys_os_shell", "Bash", "bash", "Shell", "terminal", "developer__shell"],
+)
+def test_default_shell_tools_cover_every_harness(tool: str) -> None:
+    """Every harness family's shell tool is gated by default.
+
+    Cursor (``Shell``), pi / opencode (``bash``), Hermes (``terminal``) and
+    Goose (``developer__shell``) otherwise bypass the gate entirely.
+    """
+    policy = block_working_dir_changes()
+    result = policy(tc(tool, {"command": "cd /etc"}))
+    assert result is not None and result["result"] == "DENY"
+    assert policy(tc(tool, {"command": "git status"})) is None
+
+
 def test_default_shell_tools_includes_native_bash() -> None:
     """The default ``shell_tools`` set includes Claude/Codex native ``Bash``.
 

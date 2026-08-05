@@ -25,6 +25,21 @@ import re
 # skipped (``sudo git push`` → ``git push``).
 CMD_WRAPPERS: frozenset[str] = frozenset({"sudo", "env", "command", "time", "nohup", "exec"})
 
+# Shell / terminal tool names across every supported harness family, used as the
+# default gated surface by all shell-inspecting built-in policies so they agree
+# on what "the shell tool" means:
+# ``sys_os_shell`` (Omnigent built-in), ``Bash`` (Claude Code / Codex native),
+# ``bash`` (pi / opencode-native), ``Shell`` (Cursor), ``terminal`` (Hermes),
+# ``developer__shell`` (Goose).
+DEFAULT_SHELL_TOOLS: tuple[str, ...] = (
+    "sys_os_shell",
+    "Bash",
+    "bash",
+    "Shell",
+    "terminal",
+    "developer__shell",
+)
+
 # Wrappers that carry their OWN option flags (and, for ``timeout``, a leading
 # duration positional) before the real command. Skipping only the wrapper word
 # (as for ``CMD_WRAPPERS``) would leave a flag or the duration as the apparent
