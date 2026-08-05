@@ -1,6 +1,8 @@
 package ai.omnigent.android
 
 import android.content.res.Configuration
+import android.os.Looper
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebView
@@ -106,16 +108,54 @@ class MainActivityTest {
         ServerStore(ApplicationProvider.getApplicationContext()).connect("https://example.com")
         val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
         val pill = activity.switchButton()
-        val container = pill.parent as ViewGroup
+        val slot = pill.parent as ViewGroup
+        val density = activity.resources.displayMetrics.density
+        val target = (48 * density).toInt()
+
+        val spec = View.MeasureSpec.makeMeasureSpec(2000, View.MeasureSpec.AT_MOST)
+        slot.measure(spec, spec)
+        slot.layout(100, 40, 100 + slot.measuredWidth, 40 + slot.measuredHeight)
+
+        // A minimum rather than a fixed height, so a taller pill isn't clipped.
+        assertEquals(target, slot.minimumHeight)
+        assertTrue(slot.measuredHeight >= target)
+        // The slot, not the root container: the full-screen WebView consumes
+        // touches before a root-level delegate would be consulted.
+        val delegate = shadowOf(slot.touchDelegate)
+        assertEquals(pill, delegate.delegateView)
+        assertEquals(slot.height, delegate.bounds.height())
+        assertTrue(delegate.bounds.height() >= target)
+    }
+
+    @Test
+    fun `tap below the visible pill still opens the server switcher`() {
+        ServerStore(ApplicationProvider.getApplicationContext()).connect("https://example.com")
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        val pill = activity.switchButton()
+        val slot = pill.parent as ViewGroup
         val density = activity.resources.displayMetrics.density
 
-        pill.layout(100, 40, 220, 40 + (27 * density).toInt())
+        slot.layout(100, 40, 220, 40 + (48 * density).toInt())
+        pill.layout(0, 0, 120, (27 * density).toInt())
+        var clicked = false
+        pill.setOnClickListener { clicked = true }
 
-        val delegate = shadowOf(container.touchDelegate)
-        assertEquals(pill, delegate.delegateView)
-        assertEquals(pill.left, delegate.bounds.left)
-        assertEquals(pill.top, delegate.bounds.top)
-        assertEquals((48 * density).toInt(), delegate.bounds.height())
+        // 10dp below the visible pill — inside the enlarged target, outside the pill.
+        slot.dispatchTouch(MotionEvent.ACTION_DOWN, 60f, (37 * density))
+        slot.dispatchTouch(MotionEvent.ACTION_UP, 60f, (37 * density))
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertTrue(clicked)
+    }
+
+    private fun ViewGroup.dispatchTouch(
+        action: Int,
+        x: Float,
+        y: Float,
+    ) {
+        val event = MotionEvent.obtain(0L, 0L, action, x, y, 0)
+        dispatchTouchEvent(event)
+        event.recycle()
     }
 
     private fun MainActivity.switchButton(): View =
