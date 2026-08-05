@@ -18,7 +18,10 @@ Endpoints (all mounted at the app root):
 - ``POST /oauth/device/approve`` / ``POST /oauth/device/deny`` —
   authenticated browser actions binding the grant to the identity.
 - ``POST /oauth/token`` — the client's polling / refresh endpoint;
-  returns delegated access + refresh tokens.
+  returns delegated access + refresh tokens. Also dispatches the
+  client-credentials grant (see
+  :mod:`omnigent.server.routes.client_credentials`) when a confidential
+  client is configured, since this router owns the path.
 - ``POST /oauth/revoke`` — revoke a grant (backs client logout).
 
 Mounted only in ``accounts`` auth mode (and only when
@@ -53,6 +56,7 @@ import logging
 import os
 import secrets
 import time
+from collections.abc import Callable
 
 import jwt
 from fastapi import APIRouter, HTTPException, Request
@@ -61,6 +65,13 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Re
 from omnigent.server.auth import UnifiedAuthProvider
 from omnigent.server.device_grant_store import DeviceGrantStore, hash_secret
 from omnigent.server.routes._origin import require_trusted_origin
+from omnigent.server.routes.client_credentials import (
+    GRANT_TYPE as CLIENT_CREDENTIALS_GRANT_TYPE,
+)
+from omnigent.server.routes.client_credentials import (
+    ServiceClientConfig,
+    handle_client_credentials_grant,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -123,7 +134,7 @@ def mint_delegated_token(
     ttl_seconds: int,
     provider: str,
     *,
-    grant_id: str,
+    grant_id: str | None,
     client_id: str,
     jti: str,
     scope: str = DELEGATED_SCOPE,
@@ -139,7 +150,8 @@ def mint_delegated_token(
       layer rejects admin endpoints when this claim is present.
     - ``grant_id`` — the device grant this token was issued from,
       checked against the revocation denylist so revoking the grant
-      immediately kills the token.
+      immediately kills the token. Omitted for a token with no device
+      grant behind it (the client-credentials grant).
     - ``jti`` — unique token id, for audit/log correlation.
     - ``act`` — provenance (RFC 8693 style), ``{"client_id": "<app>"}``,
       naming the application that obtained the grant so every delegated
@@ -149,7 +161,8 @@ def mint_delegated_token(
     :param cookie_secret: HMAC key for HS256 signing.
     :param ttl_seconds: Token lifetime in seconds (kept short — ≤ 1 h).
     :param provider: Identity provider name (informational claim).
-    :param grant_id: The device grant id.
+    :param grant_id: The device grant id, or ``None`` when the token was
+        not issued from a device grant.
     :param client_id: The RFC 8628 client id (the requesting application,
         e.g. ``"slack"``); recorded in the ``act`` claim for audit.
     :param jti: Unique token id.
@@ -163,10 +176,11 @@ def mint_delegated_token(
         "exp": now + ttl_seconds,
         "provider": provider,
         "scope": scope,
-        "grant_id": grant_id,
         "jti": jti,
         "act": {"client_id": client_id},
     }
+    if grant_id is not None:
+        payload["grant_id"] = grant_id
     return jwt.encode(payload, cookie_secret, algorithm="HS256")
 
 
@@ -260,12 +274,21 @@ class _SlidingWindowRateLimiter:
 def create_device_auth_router(
     auth_provider: UnifiedAuthProvider,
     device_grant_store: DeviceGrantStore,
+    *,
+    service_client: ServiceClientConfig | None = None,
+    is_admin: Callable[[str], bool] | None = None,
 ) -> APIRouter:
     """Build the ``/oauth/*`` device-grant router.
 
     :param auth_provider: The active provider. Must be ``accounts`` mode;
         its cookie config supplies the HMAC signing key and public base URL.
     :param device_grant_store: Persistence for device grants.
+    :param service_client: Confidential client for the client-credentials
+        grant, when one is configured. This router owns ``/oauth/token``,
+        so it dispatches that grant type itself rather than letting a
+        second router claim the same path.
+    :param is_admin: Optional live admin check for the client-credentials
+        principal.
     :returns: APIRouter to mount at the app root.
     """
     if auth_provider._source != "accounts":
@@ -562,6 +585,15 @@ def create_device_auth_router(
             return _handle_device_code_grant(str(form.get("device_code") or ""))
         if grant_type == "refresh_token":
             return _handle_refresh_grant(str(form.get("refresh_token") or ""))
+        if grant_type == CLIENT_CREDENTIALS_GRANT_TYPE and service_client is not None:
+            return handle_client_credentials_grant(
+                request,
+                form,
+                service_client=service_client,
+                cookie_secret=cookie_secret,
+                provider_name=provider_name,
+                is_admin=is_admin,
+            )
         return _oauth_error("unsupported_grant_type")
 
     def _handle_device_code_grant(device_code: str) -> Response:
