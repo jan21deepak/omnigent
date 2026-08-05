@@ -15,6 +15,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
@@ -79,6 +80,27 @@ class MainActivityTest {
         activity.onConfigurationChanged(lightConfiguration)
         assertTrue(insetsController.isAppearanceLightStatusBars)
         assertTrue(insetsController.isAppearanceLightNavigationBars)
+    }
+
+    @Test
+    fun `density change rescales the server-switcher pill metrics`() {
+        ServerStore(ApplicationProvider.getApplicationContext()).connect("https://example.com")
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        val pill = activity.switchButton()
+
+        val startDp = activity.resources.displayMetrics.density
+        assertEquals((12 * startDp).toInt(), pill.paddingLeft)
+        assertEquals(6 * startDp, pill.elevation, 0.001f)
+
+        RuntimeEnvironment.setQualifiers("+560dpi")
+        val denserConfig = Configuration(activity.resources.configuration)
+        activity.onConfigurationChanged(denserConfig)
+
+        val newDp = activity.resources.displayMetrics.density
+        assertTrue("density should have increased", newDp > startDp)
+        assertEquals((12 * newDp).toInt(), pill.paddingLeft)
+        assertEquals((6 * newDp).toInt(), pill.paddingTop)
+        assertEquals(6 * newDp, pill.elevation, 0.001f)
     }
 
     @Test
