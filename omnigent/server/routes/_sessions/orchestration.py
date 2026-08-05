@@ -2282,8 +2282,19 @@ async def _run_managed_launch(
     """
     agent_name: str | None = None
     if agent_store is not None:
-        conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
-        agent_name = await asyncio.to_thread(_builtin_agent_name_for_session, conv, agent_store)
+        # A store read failure must not escape this fire-and-forget task and
+        # leave the tracker unsettled; an unclassified sandbox is acceptable.
+        try:
+            conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+            agent_name = await asyncio.to_thread(
+                _builtin_agent_name_for_session, conv, agent_store
+            )
+        except Exception:  # noqa: BLE001
+            _logger.warning(
+                "Could not resolve the built-in agent for session %s",
+                session_id,
+                exc_info=True,
+            )
     managed = await _provision_managed_sandbox(
         session_id=session_id,
         owner=owner,
