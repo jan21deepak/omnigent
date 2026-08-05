@@ -11,20 +11,26 @@ from omnigent.entities.conversation import (
 )
 
 
-def _message_item(created_by: str | None) -> ConversationItem:
+def _message_item(created_by: str | None, *, created_at: int = 0) -> ConversationItem:
     """Build a persisted user-message item with the given author."""
     return ConversationItem(
         id="msg_1",
         type="message",
         status="completed",
         response_id="resp_1",
-        created_at=0,
+        created_at=created_at,
         data=MessageData(
             role="user",
             content=[{"type": "input_text", "text": "hi"}],
         ),
         created_by=created_by,
     )
+
+
+def test_to_api_dict_emits_created_at() -> None:
+    """The flat API shape carries the item's per-item ``created_at``."""
+    api = _message_item(None, created_at=1_700_000_000).to_api_dict()
+    assert api["created_at"] == 1_700_000_000
 
 
 def test_to_api_dict_exposes_created_by_when_set() -> None:

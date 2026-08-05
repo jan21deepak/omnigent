@@ -2707,6 +2707,9 @@ async def test_list_session_items_returns_items(
     assert len(items) >= 1
     user_msgs = [i for i in items if i.get("type") == "message" and i.get("role") == "user"]
     assert len(user_msgs) >= 1
+    # Flat items carry a per-item timestamp, matching the nested
+    # SessionResponse.items shape from GET /v1/sessions/{id}.
+    assert all(isinstance(i.get("created_at"), int) for i in items)
 
 
 async def test_list_session_items_pagination(
