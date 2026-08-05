@@ -123,6 +123,7 @@ stores into ``create_app``):
 from __future__ import annotations
 
 import asyncio
+import functools
 import itertools
 import logging
 import posixpath
@@ -2114,6 +2115,7 @@ async def launch_managed_host(
     host_store: HostStore,
     repo: RepoWorkspace | None = None,
     on_stage: Callable[[str], None] | None = None,
+    agent_name: str | None = None,
 ) -> ManagedHostLaunch:
     """
     Provision a sandbox, start a host in it, and wait until it registers.
@@ -2147,6 +2149,11 @@ async def launch_managed_host(
         worker thread (the sandbox exec steps run via
         ``asyncio.to_thread``), so it must be thread-safe. ``None``
         disables progress reporting.
+    :param agent_name: Name of the built-in agent the session is
+        bound to, forwarded to the launcher so a provider can
+        classify the sandbox (see
+        :meth:`~omnigent.onboarding.sandboxes.base.SandboxHostLauncher.start_host`),
+        or ``None`` for a session-scoped agent.
     :returns: The registered host id + in-sandbox workspace path
         (the cloned repository directory when *repo* is set).
     :raises HTTPException: 400 when the configured provider lacks
@@ -2177,6 +2184,7 @@ async def launch_managed_host(
         sandbox_id=sandbox_id,
         repo=repo,
         on_stage=on_stage,
+        agent_name=agent_name,
     )
     return ManagedHostLaunch(host_id=host_id, workspace=workspace)
 
@@ -2188,6 +2196,7 @@ async def relaunch_managed_host(
     host_store: HostStore,
     repo: RepoWorkspace | None = None,
     on_stage: Callable[[str], None] | None = None,
+    agent_name: str | None = None,
 ) -> ManagedHostLaunch:
     """
     Provision a NEW sandbox generation for an existing managed host.
@@ -2217,6 +2226,8 @@ async def relaunch_managed_host(
     :param on_stage: Progress observer forwarded to
         :func:`_arm_and_start_host`; see :func:`launch_managed_host`.
         ``None`` disables progress reporting.
+    :param agent_name: Name of the built-in agent the session is
+        bound to; see :func:`launch_managed_host`.
     :returns: The (unchanged) host id + fresh in-sandbox workspace.
     :raises HTTPException: 400 when the host's recorded provider no
         longer matches the configured launcher; 502 when
@@ -2253,6 +2264,7 @@ async def relaunch_managed_host(
         sandbox_id=sandbox_id,
         repo=repo,
         on_stage=on_stage,
+        agent_name=agent_name,
         keep_host_on_failure=True,
     )
     return ManagedHostLaunch(host_id=host.host_id, workspace=workspace)
@@ -2271,47 +2283,13 @@ async def _start_sandbox_host(
     repo_name: str | None,
     host_config: dict[str, object] | None,
     on_stage: Callable[[str], None] | None = None,
+    agent_name: str | None = None,
 ) -> str:
     """Start a host without sending absent optional arguments to legacy launchers."""
-    if host_config is None and on_stage is None:
-        return await asyncio.to_thread(
-            launcher.start_host,
-            sandbox_id,
-            token=token,
-            host_id=host_id,
-            host_name=host_name,
-            server_url=server_url,
-            repo_url=repo_url,
-            repo_branch=repo_branch,
-            repo_name=repo_name,
-        )
-    if host_config is None:
-        return await asyncio.to_thread(
-            launcher.start_host,
-            sandbox_id,
-            token=token,
-            host_id=host_id,
-            host_name=host_name,
-            server_url=server_url,
-            repo_url=repo_url,
-            repo_branch=repo_branch,
-            repo_name=repo_name,
-            on_stage=on_stage,
-        )
-    if on_stage is None:
-        return await asyncio.to_thread(
-            launcher.start_host,
-            sandbox_id,
-            token=token,
-            host_id=host_id,
-            host_name=host_name,
-            server_url=server_url,
-            repo_url=repo_url,
-            repo_branch=repo_branch,
-            repo_name=repo_name,
-            host_config=host_config,
-        )
-    return await asyncio.to_thread(
+    # A deployment-injected launcher may implement an older start_host
+    # signature, so an optional argument is bound only when it carries a
+    # value — an unset one would be a TypeError there and means nothing here.
+    start = functools.partial(
         launcher.start_host,
         sandbox_id,
         token=token,
@@ -2321,9 +2299,14 @@ async def _start_sandbox_host(
         repo_url=repo_url,
         repo_branch=repo_branch,
         repo_name=repo_name,
-        host_config=host_config,
-        on_stage=on_stage,
     )
+    if host_config is not None:
+        start = functools.partial(start, host_config=host_config)
+    if on_stage is not None:
+        start = functools.partial(start, on_stage=on_stage)
+    if agent_name is not None:
+        start = functools.partial(start, agent_name=agent_name)
+    return await asyncio.to_thread(start)
 
 
 async def _arm_and_start_host(
@@ -2337,6 +2320,7 @@ async def _arm_and_start_host(
     sandbox_id: str,
     repo: RepoWorkspace | None = None,
     on_stage: Callable[[str], None] | None = None,
+    agent_name: str | None = None,
     keep_host_on_failure: bool = False,
 ) -> str:
     """
@@ -2366,6 +2350,9 @@ async def _arm_and_start_host(
     :param on_stage: Progress observer forwarded to the launcher's
         ``start_host``; see :func:`launch_managed_host`. ``None``
         disables progress reporting.
+    :param agent_name: Name of the built-in agent the session is
+        bound to, forwarded to the launcher's ``start_host``; see
+        :func:`launch_managed_host`.
     :param keep_host_on_failure: ``True`` on a relaunch — failure
         cleanup terminates the new sandbox and revokes the token but
         keeps the host row. ``False`` (first launch) deletes the row.
@@ -2402,6 +2389,7 @@ async def _arm_and_start_host(
             repo_name=repo.repo_name if repo is not None else None,
             host_config=config.host_config,
             on_stage=on_stage,
+            agent_name=agent_name,
         )
         await _wait_for_host_online(host_store, host_id)
     except Exception as exc:

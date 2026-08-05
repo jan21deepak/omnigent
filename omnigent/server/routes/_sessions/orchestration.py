@@ -2225,6 +2225,7 @@ async def _run_managed_launch(
     host_store: HostStore,
     host_registry: HostRegistry | None,
     tunnel_registry: TunnelRegistry | None,
+    agent_store: AgentStore | None = None,
     relaunch_host: Host | None = None,
 ) -> None:
     """
@@ -2271,10 +2272,18 @@ async def _run_managed_launch(
     :param tunnel_registry: Runner-tunnel registry used to await the
         launched runner's connection. ``None`` in minimal test
         wirings (the rendezvous then settles at frame-send).
+    :param agent_store: Store the session's bound agent is read from to
+        classify the sandbox by built-in agent (see
+        :func:`_builtin_agent_name_for_session`). ``None`` in minimal
+        test wirings — the sandbox is then left unclassified.
     :param relaunch_host: Existing managed host row to relaunch a new
         sandbox generation for, or ``None`` for a first launch (a
         fresh host identity is minted).
     """
+    agent_name: str | None = None
+    if agent_store is not None:
+        conv = await asyncio.to_thread(conversation_store.get_conversation, session_id)
+        agent_name = await asyncio.to_thread(_builtin_agent_name_for_session, conv, agent_store)
     managed = await _provision_managed_sandbox(
         session_id=session_id,
         owner=owner,
@@ -2283,6 +2292,7 @@ async def _run_managed_launch(
         tracker=tracker,
         host_store=host_store,
         relaunch_host=relaunch_host,
+        agent_name=agent_name,
     )
     if managed is None:
         return
@@ -2640,6 +2650,7 @@ def _kick_managed_relaunch(
             host_store=host_store,
             host_registry=getattr(app_state, "host_registry", None),
             tunnel_registry=getattr(app_state, "tunnel_registry", None),
+            agent_store=getattr(app_state, "agent_store", None),
             relaunch_host=host,
         )
     )

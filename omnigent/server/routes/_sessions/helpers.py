@@ -32,7 +32,7 @@ from omnigent.cost_plan import (
     COST_CONTROL_LABEL_NAMESPACE,
     reserved_cost_control_keys,
 )
-from omnigent.db.utils import generate_task_id
+from omnigent.db.utils import builtin_agent_id, generate_task_id
 from omnigent.entities import (
     Agent,
     Conversation,
@@ -4258,6 +4258,39 @@ async def cancel_managed_launch_tasks() -> None:
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def _builtin_agent_name_for_session(
+    conv: Conversation | None,
+    agent_store: AgentStore | None,
+) -> str | None:
+    """
+    Resolve the BUILT-IN agent a session is bound to, by name.
+
+    The name classifies the session's sandbox for a provider that can
+    expose it to the infrastructure (the Kubernetes launcher stamps it on
+    the runner Pod), so it must not be forgeable: it is read from the
+    bound agent row rather than from anything the client sent, and only a
+    built-in — a global row (``session_id is None``) whose id is the
+    name-derived :func:`builtin_agent_id` — yields one. A session-scoped
+    agent named after a built-in is therefore unlabelled rather than
+    labelled as that built-in.
+
+    :param conv: The session row, or ``None`` when it could not be read.
+    :param agent_store: Store the bound agent is read from, or ``None``
+        when the caller has no store wired.
+    :returns: The built-in agent's name, or ``None`` when the session is
+        bound to a session-scoped agent, to no agent, or the agent could
+        not be resolved.
+    """
+    if conv is None or conv.agent_id is None or agent_store is None:
+        return None
+    agent = agent_store.get(conv.agent_id)
+    if agent is None or agent.session_id is not None:
+        return None
+    if agent.id != builtin_agent_id(agent.name):
+        return None
+    return agent.name
+
+
 async def _provision_managed_sandbox(
     *,
     session_id: str,
@@ -4267,6 +4300,7 @@ async def _provision_managed_sandbox(
     tracker: ManagedLaunchTracker,
     host_store: HostStore,
     relaunch_host: Host | None,
+    agent_name: str | None = None,
 ) -> ManagedHostLaunch | None:
     """
     Run the provision phase of a background managed launch.
@@ -4284,6 +4318,9 @@ async def _provision_managed_sandbox(
     :param host_store: Persistent host registrations.
     :param relaunch_host: Existing host row for a relaunch, or
         ``None`` for a first launch.
+    :param agent_name: Name of the built-in agent the session is bound
+        to (see :func:`_builtin_agent_name_for_session`), forwarded to
+        the launcher, or ``None`` for a session-scoped agent.
     :returns: The launch result, or ``None`` when the launch failed
         (the tracker entry is already settled with the reason).
     """
@@ -4309,6 +4346,7 @@ async def _provision_managed_sandbox(
                 host_store=host_store,
                 repo=repo,
                 on_stage=_on_stage,
+                agent_name=agent_name,
             )
         return await launch_managed_host(
             config=sandbox_config,
@@ -4316,6 +4354,7 @@ async def _provision_managed_sandbox(
             host_store=host_store,
             repo=repo,
             on_stage=_on_stage,
+            agent_name=agent_name,
         )
     except HTTPException as exc:
         _logger.warning(
@@ -8716,6 +8755,7 @@ __all__ = [
     "_build_new_item",
     "_build_policy_engine_from_spec",
     "_build_skill_slash_command_policy_body",
+    "_builtin_agent_name_for_session",
     "_canonical_tool_input",
     "_child_session_current_task_status_from_cached_status",
     "_child_session_summary_from_conversation",

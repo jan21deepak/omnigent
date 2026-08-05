@@ -351,6 +351,38 @@ def test_build_pod_manifest_without_secret_mounts_is_unchanged() -> None:
     ]
 
 
+def test_build_pod_manifest_without_agent_name_carries_only_the_base_labels() -> None:
+    """A session-scoped agent (no name resolved) leaves the Pod unclassified."""
+    manifest = build_pod_manifest(**_MANIFEST_KW)
+    assert manifest["metadata"]["labels"] == {
+        "app.kubernetes.io/managed-by": "omnigent",
+        "omnigent.ai/role": "sandbox-host",
+    }
+
+
+def test_build_pod_manifest_stamps_the_built_in_agent_name() -> None:
+    """A built-in agent adds the classifier alongside the base labels."""
+    manifest = build_pod_manifest(**_MANIFEST_KW, agent_name="claude-native-ui")
+    assert manifest["metadata"]["labels"] == {
+        "app.kubernetes.io/managed-by": "omnigent",
+        "omnigent.ai/role": "sandbox-host",
+        "omnigent.ai/agent": "claude-native-ui",
+    }
+
+
+@pytest.mark.parametrize(
+    "agent_name",
+    ["", "-leading-dash", "trailing-dash-", "has spaces", "sl/ash", "x" * 64],
+)
+def test_build_pod_manifest_skips_an_unusable_agent_label_value(agent_name: str) -> None:
+    """A name Kubernetes would reject as a label value is dropped, not sent."""
+    manifest = build_pod_manifest(**_MANIFEST_KW, agent_name=agent_name)
+    assert manifest["metadata"]["labels"] == {
+        "app.kubernetes.io/managed-by": "omnigent",
+        "omnigent.ai/role": "sandbox-host",
+    }
+
+
 def test_build_pod_manifest_is_restricted_and_least_privilege() -> None:
     """The Pod satisfies Pod Security 'restricted' and mounts no SA token."""
     manifest = build_pod_manifest(**_MANIFEST_KW)
@@ -578,6 +610,20 @@ def test_launch_host_creates_secret_then_pod_and_returns_workspace(
     assert fake_core.created_pods[0]["metadata"]["name"] == "omnigent-pod-1"
     # Nothing torn down on success.
     assert fake_core.deleted_pods == []
+
+
+def test_launch_host_stamps_the_agent_label_on_the_created_pod(fake_core: _FakeCore) -> None:
+    """The agent bound to the session reaches the Pod the cluster sees."""
+    fake_core.read_queue = [_pod(phase="Running")]
+    _launcher().start_host(
+        "omnigent-pod-1",
+        token=_TOKEN,
+        host_id="host_1",
+        host_name="managed-1",
+        server_url="http://srv.example.com",
+        agent_name="polly",
+    )
+    assert fake_core.created_pods[0]["metadata"]["labels"]["omnigent.ai/agent"] == "polly"
 
 
 def test_launch_host_threads_pvc_mounts_into_the_pod(fake_core: _FakeCore) -> None:
