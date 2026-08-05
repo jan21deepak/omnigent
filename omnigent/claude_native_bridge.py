@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import json
 import os
@@ -820,6 +821,7 @@ def prepare_bridge_dir(
     bridge_id: str | None = None,
     workspace: Path,
     launch_model: str | None = None,
+    sandbox: OSEnvSandboxSpec | None = None,
 ) -> Path:
     """
     Create or refresh the bridge directory for a native Claude session.
@@ -834,6 +836,10 @@ def prepare_bridge_dir(
         forwarder can re-inject it when Claude Code's ``/model``
         normalizes the name to one the gateway rejects.  ``None`` when
         no ucode profile is active.
+    :param sandbox: Sandbox configuration the bridge's workspace
+        ``sys_os_*`` tools must run under — the agent spec's sandbox
+        after policy overrides (e.g. ``force_sandbox``) have been
+        applied. ``None`` leaves the tools unsandboxed.
     :returns: Bridge directory path.
     """
     resolved_bridge_id = bridge_id or conversation_id
@@ -853,6 +859,8 @@ def prepare_bridge_dir(
     }
     if launch_model is not None:
         payload["launch_model"] = launch_model
+    if sandbox is not None:
+        payload["sandbox"] = sandbox_config_payload(sandbox)
     _write_json_file(bridge_dir / _CONFIG_FILE, payload)
     # Keep ``_PERMISSION_HOOK_FILE`` — the PermissionRequest command hook
     # reads the Omnigent server URL from it at runtime, so wiping it on re-prep
@@ -868,6 +876,42 @@ def prepare_bridge_dir(
         with contextlib.suppress(FileNotFoundError):
             (bridge_dir / filename).unlink()
     return bridge_dir
+
+
+def sandbox_config_payload(sandbox: OSEnvSandboxSpec) -> _JsonObject:
+    """
+    Serialize a sandbox spec for the bridge config file.
+
+    ``credential_proxy`` is dropped: its secrets are resolved by the
+    parent process at runtime, so the bridge's own tools cannot use it.
+
+    :param sandbox: Sandbox configuration to persist, e.g.
+        ``OSEnvSandboxSpec(type="linux_bwrap")``.
+    :returns: JSON-serializable sandbox payload.
+    """
+    payload = dataclasses.asdict(sandbox)
+    payload.pop("credential_proxy", None)
+    return cast(_JsonObject, payload)
+
+
+def _sandbox_spec_from_config(raw: object) -> OSEnvSandboxSpec:
+    """
+    Rebuild the sandbox spec the bridge's OS tools run under.
+
+    :param raw: The bridge config's ``sandbox`` value, as written by
+        :func:`sandbox_config_payload`.
+    :returns: The configured sandbox, or an unsandboxed spec when the
+        launch did not carry one.
+    :raises RuntimeError: If the payload carries fields
+        :class:`OSEnvSandboxSpec` does not accept — failing loud beats
+        silently downgrading an enforced sandbox to ``none``.
+    """
+    if not isinstance(raw, dict):
+        return OSEnvSandboxSpec(type="none")
+    try:
+        return OSEnvSandboxSpec(**raw)
+    except TypeError as exc:
+        raise RuntimeError(f"invalid sandbox config in bridge config: {exc}") from exc
 
 
 def ensure_claude_workspace_trusted(workspace: Path) -> None:
@@ -4070,6 +4114,10 @@ def _build_tools(config: _JsonObject) -> tuple[dict[str, Tool], Callable[[], Non
     """
     Build Omnigent MCP tools served by the bridge.
 
+    The tools run under the sandbox the launch recorded in the bridge
+    config, so a policy-forced sandbox (``force_sandbox``) contains them
+    just as it contains the agent's own terminal.
+
     :param config: Bridge config JSON object.
     :returns: ``(tools, close_tools)`` where ``close_tools``
         releases any helper processes.
@@ -4081,7 +4129,7 @@ def _build_tools(config: _JsonObject) -> tuple[dict[str, Tool], Callable[[], Non
         spec = OSEnvSpec(
             type="caller_process",
             cwd=str(workspace),
-            sandbox=OSEnvSandboxSpec(type="none"),
+            sandbox=_sandbox_spec_from_config(config.get("sandbox")),
             fork=False,
         )
         os_env = create_os_environment(spec)

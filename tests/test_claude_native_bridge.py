@@ -234,6 +234,105 @@ def test_prepare_bridge_dir_preserves_token_and_updates_runtime(
     assert "headers" not in second_config
 
 
+def test_prepare_bridge_dir_persists_sandbox_for_bridge_tools(
+    tmp_path: Path,
+) -> None:
+    """
+    The launch's sandbox is recorded so the bridge's OS tools honour it.
+
+    The bridge's ``sys_os_*`` tools are built in the ``serve-mcp``
+    subprocess, which only sees ``bridge.json``. Without the sandbox in
+    that file a policy-forced sandbox (``force_sandbox``) can never reach
+    them and the tools silently run unconfined.
+    """
+    from omnigent.inner.datamodel import OSEnvSandboxSpec
+
+    bridge_dir = prepare_bridge_dir(
+        "conv_abc",
+        workspace=tmp_path,
+        sandbox=OSEnvSandboxSpec(type="linux_bwrap", write_paths=["."], allow_network=False),
+    )
+
+    config = json.loads((bridge_dir / "bridge.json").read_text(encoding="utf-8"))
+    assert config["sandbox"]["type"] == "linux_bwrap"
+    assert config["sandbox"]["write_paths"] == ["."]
+    assert config["sandbox"]["allow_network"] is False
+
+
+def test_build_tools_applies_configured_sandbox(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``_build_tools`` builds its OS environment with the recorded sandbox.
+
+    A hardcoded ``type: none`` here made ``force_sandbox`` structurally
+    unreachable for claude-native sessions: the policy evaluated fine but
+    the shell/file tools still ran with full host access.
+    """
+    captured: dict[str, Any] = {}
+
+    def _fake_create_os_environment(spec: Any) -> Any:
+        """Record the spec instead of spawning a helper process."""
+        captured["spec"] = spec
+        return SimpleNamespace(close=lambda: None)
+
+    monkeypatch.setattr(claude_native_bridge, "create_os_environment", _fake_create_os_environment)
+    monkeypatch.setattr(claude_native_bridge, "build_os_env_tools", lambda _os_env: [])
+
+    claude_native_bridge._build_tools(
+        {
+            "workspace": str(tmp_path),
+            "sandbox": {"type": "linux_bwrap", "read_paths": ["/usr"], "allow_network": False},
+        }
+    )
+
+    sandbox = captured["spec"].sandbox
+    assert sandbox.type == "linux_bwrap", (
+        f"bridge OS tools were built with sandbox {sandbox.type!r}; the "
+        "policy-forced sandbox never reached them"
+    )
+    assert sandbox.read_paths == ["/usr"]
+    assert sandbox.allow_network is False
+
+
+def test_build_tools_without_sandbox_config_stays_unsandboxed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch that recorded no sandbox keeps the tools unconfined."""
+    captured: dict[str, Any] = {}
+
+    def _fake_create_os_environment(spec: Any) -> Any:
+        """Record the spec instead of spawning a helper process."""
+        captured["spec"] = spec
+        return SimpleNamespace(close=lambda: None)
+
+    monkeypatch.setattr(claude_native_bridge, "create_os_environment", _fake_create_os_environment)
+    monkeypatch.setattr(claude_native_bridge, "build_os_env_tools", lambda _os_env: [])
+
+    claude_native_bridge._build_tools({"workspace": str(tmp_path)})
+
+    assert captured["spec"].sandbox.type == "none"
+
+
+def test_build_tools_rejects_unusable_sandbox_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unparseable sandbox fails loud instead of downgrading to ``none``."""
+    monkeypatch.setattr(
+        claude_native_bridge,
+        "create_os_environment",
+        lambda _spec: SimpleNamespace(close=lambda: None),
+    )
+
+    with pytest.raises(RuntimeError, match="invalid sandbox config"):
+        claude_native_bridge._build_tools(
+            {"workspace": str(tmp_path), "sandbox": {"type": "linux_bwrap", "bogus": 1}}
+        )
+
+
 def test_prepare_bridge_dir_preserves_permission_hook_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

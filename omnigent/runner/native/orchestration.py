@@ -5636,7 +5636,16 @@ async def _auto_create_claude_terminal(
     )
 
     _pre_wipe_claude_sid = _read_csid_pre_wipe(_bridge_dir_for_bridge_id(bridge_id))
-    bridge_dir = prepare_bridge_dir(session_id, bridge_id=bridge_id, workspace=Path(workspace))
+    # Record the agent's sandbox (already carrying any policy override, e.g.
+    # ``force_sandbox``) so the bridge's workspace ``sys_os_*`` tools run under
+    # the same containment as the Claude terminal launched below.
+    spec_os_env = _agent_os_env_from_spec(agent_spec)
+    bridge_dir = prepare_bridge_dir(
+        session_id,
+        bridge_id=bridge_id,
+        workspace=Path(workspace),
+        sandbox=(spec_os_env.sandbox if spec_os_env is not None else None),
+    )
     # Cancel any surviving forwarder BEFORE wiping its cursor/seen state, else it
     # re-posts with fresh dedup state alongside the forwarder spawned below.
     await _cancel_auto_forwarder_task(session_id)
