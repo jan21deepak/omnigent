@@ -118,6 +118,23 @@ class MainActivityTest {
         assertEquals((48 * density).toInt(), delegate.bounds.height())
     }
 
+    @Test
+    fun `touch target rescales after a density change`() {
+        ServerStore(ApplicationProvider.getApplicationContext()).connect("https://example.com")
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        val pill = activity.switchButton()
+        val container = pill.parent as ViewGroup
+
+        RuntimeEnvironment.setQualifiers("+560dpi")
+        activity.onConfigurationChanged(Configuration(activity.resources.configuration))
+        val newDensity = activity.resources.displayMetrics.density
+
+        pill.layout(100, 40, 220, 40 + (27 * newDensity).toInt())
+
+        val delegate = shadowOf(container.touchDelegate)
+        assertEquals((48 * newDensity).toInt(), delegate.bounds.height())
+    }
+
     private fun MainActivity.switchButton(): View =
         MainActivity::class
             .java
