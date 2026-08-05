@@ -610,6 +610,13 @@ async def test_handle_launch_spawns_subprocess(
         "runner subprocess must be spawned with stdin=subprocess.DEVNULL"
     )
 
+    # The runner must start in its session workspace, not the daemon's
+    # inherited cwd: once that dir is deleted every Path.cwd() in the runner
+    # raises and native terminal creation dies before the harness launches.
+    assert spawned_kwargs.get("cwd") == str(workspace), (
+        "runner subprocess must be spawned with cwd set to the session workspace"
+    )
+
     # Clean up the spawned sleep process (and its exit watcher).
     _cleanup_host(host)
 
