@@ -7761,6 +7761,20 @@ def _host_link_markup(value: _HostJsonValue, *, max_chars: int, shorten: bool = 
     return f"[link={target}]{_host_markup(display)}[/link]"
 
 
+def _host_line_width(console: Console) -> int:
+    """
+    Return the width status lines must fit into.
+
+    Redirected or piped output has no link detection to protect and no real
+    width, so values are kept whole there rather than shortened to Rich's
+    assumed 80 columns.
+
+    :param console: Rich console returned by :func:`_host_console`.
+    :returns: The terminal width, or a width no value will exceed.
+    """
+    return console.width if console.is_terminal else 100_000
+
+
 def _host_print_line(console: Console, markup: str) -> None:
     """
     Print one status line without soft-wrapping it.
@@ -7771,6 +7785,9 @@ def _host_print_line(console: Console, markup: str) -> None:
     :param console: Rich console returned by :func:`_host_console`.
     :param markup: Rich markup for the line.
     """
+    if not console.is_terminal:
+        console.print(markup)
+        return
     console.print(markup, no_wrap=True, overflow="ellipsis", crop=True)
 
 
@@ -7932,10 +7949,11 @@ def _echo_daemon_payloads(payloads: list[_HostPayload]) -> None:
     if not payloads:
         console.print("[dim]No host daemons found.[/dim]")
         return
+    line_width = _host_line_width(console)
     for idx, payload in enumerate(payloads):
         if idx:
             console.print()
-        target = _host_target_label(payload, width=max(24, min(console.width - 2, 96)))
+        target = _host_target_label(payload, width=max(24, min(line_width - 2, 96)))
         process = _host_display_value(payload.get("process"), missing="unknown")
         host_status = _host_display_value(payload.get("host_status"), missing="unknown")
         target_link = _host_link_target(payload.get("target")) or _host_link_target(
@@ -7955,21 +7973,21 @@ def _echo_daemon_payloads(payloads: list[_HostPayload]) -> None:
         )
         server_markup = _host_link_markup(
             payload.get("server_url"),
-            max_chars=max(24, console.width - 11),
+            max_chars=max(24, line_width - 11),
         )
         _host_print_line(console, f"  server={server_markup}")
-        host_id = _host_shorten(payload.get("host_id"), max_chars=max(24, console.width - 12))
+        host_id = _host_shorten(payload.get("host_id"), max_chars=max(24, line_width - 12))
         _host_print_line(console, f"  host_id={_host_markup(host_id)}")
         if payload.get("log_path"):
             log_markup = _host_link_markup(
                 payload.get("log_path"),
-                max_chars=max(24, console.width - 8),
+                max_chars=max(24, line_width - 8),
             )
             _host_print_line(console, f"  log={log_markup}")
         if payload.get("error"):
             message = _host_truncate(
                 payload.get("error"),
-                max_chars=max(24, console.width - 10),
+                max_chars=max(24, line_width - 10),
             )
             _host_print_line(console, f"  [red]error={_host_markup(message)}[/red]")
         _add_host_payload_sessions_table(console, payload)
