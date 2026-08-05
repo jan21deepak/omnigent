@@ -839,7 +839,8 @@ def prepare_bridge_dir(
     :param sandbox: Sandbox configuration the bridge's workspace
         ``sys_os_*`` tools must run under — the agent spec's sandbox
         after policy overrides (e.g. ``force_sandbox``) have been
-        applied. ``None`` leaves the tools unsandboxed.
+        applied. ``None`` keeps whatever sandbox the bridge already
+        recorded, and leaves the tools unsandboxed when there is none.
     :returns: Bridge directory path.
     """
     resolved_bridge_id = bridge_id or conversation_id
@@ -861,6 +862,11 @@ def prepare_bridge_dir(
         payload["launch_model"] = launch_model
     if sandbox is not None:
         payload["sandbox"] = sandbox_config_payload(sandbox)
+    elif isinstance(config, dict) and isinstance(config.get("sandbox"), dict):
+        # A re-prepare with no resolved spec (the ``omnigent claude`` wrapper
+        # reattaching) must not release the sandbox this bridge already runs
+        # its ``sys_os_*`` tools under.
+        payload["sandbox"] = config["sandbox"]
     _write_json_file(bridge_dir / _CONFIG_FILE, payload)
     # Keep ``_PERMISSION_HOOK_FILE`` — the PermissionRequest command hook
     # reads the Omnigent server URL from it at runtime, so wiping it on re-prep
@@ -4132,7 +4138,18 @@ def _build_tools(config: _JsonObject) -> tuple[dict[str, Tool], Callable[[], Non
             sandbox=_sandbox_spec_from_config(config.get("sandbox")),
             fork=False,
         )
-        os_env = create_os_environment(spec)
+        try:
+            os_env = create_os_environment(spec)
+        except Exception as exc:  # noqa: BLE001 - any backend failure degrades the same way
+            # Serving no workspace tools is more contained than serving
+            # unsandboxed ones, and keeps the relay tools available.
+            print(
+                f"omnigent bridge: sandbox {spec.sandbox.type!r} unavailable, "
+                f"serving no workspace tools: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            os_env = None
     tools = {tool.name(): tool for tool in build_os_env_tools(os_env)} if os_env else {}
 
     def _close_tools() -> None:

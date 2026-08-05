@@ -259,6 +259,32 @@ def test_prepare_bridge_dir_persists_sandbox_for_bridge_tools(
     assert config["sandbox"]["allow_network"] is False
 
 
+def test_prepare_bridge_dir_keeps_sandbox_when_reprepared_without_one(
+    tmp_path: Path,
+) -> None:
+    """
+    A re-prepare without a resolved spec keeps the recorded sandbox.
+
+    ``prepare_bridge_dir`` rewrites ``bridge.json`` from scratch, and the
+    ``omnigent claude`` wrapper (which has no server-resolved spec)
+    re-prepares an existing bridge. Dropping the sandbox there would put
+    the bridge's ``sys_os_*`` tools back on the unrestricted host for the
+    rest of the session.
+    """
+    from omnigent.inner.datamodel import OSEnvSandboxSpec
+
+    prepare_bridge_dir(
+        "conv_abc",
+        workspace=tmp_path,
+        sandbox=OSEnvSandboxSpec(type="linux_bwrap", write_paths=["."]),
+    )
+    bridge_dir = prepare_bridge_dir("conv_abc", workspace=tmp_path)
+
+    config = json.loads((bridge_dir / "bridge.json").read_text(encoding="utf-8"))
+    assert config["sandbox"]["type"] == "linux_bwrap"
+    assert config["sandbox"]["write_paths"] == ["."]
+
+
 def test_build_tools_applies_configured_sandbox(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -314,6 +340,35 @@ def test_build_tools_without_sandbox_config_stays_unsandboxed(
     claude_native_bridge._build_tools({"workspace": str(tmp_path)})
 
     assert captured["spec"].sandbox.type == "none"
+
+
+def test_build_tools_serves_no_workspace_tools_when_sandbox_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    A sandbox the host cannot build costs the workspace tools, not the server.
+
+    Sandbox resolution is eager and fails for host reasons (no ``bwrap``
+    on PATH, an unscannable cwd). Letting that abort ``serve-mcp`` would
+    strip Claude of every Omnigent tool, including the relay ones the web
+    UI needs; serving no ``sys_os_*`` tools is strictly more contained.
+    """
+
+    def _boom(_spec: Any) -> Any:
+        """Fail the way an unavailable sandbox backend does."""
+        raise RuntimeError("bwrap not found on PATH")
+
+    monkeypatch.setattr(claude_native_bridge, "create_os_environment", _boom)
+
+    tools, close_tools = claude_native_bridge._build_tools(
+        {"workspace": str(tmp_path), "sandbox": {"type": "linux_bwrap"}}
+    )
+    close_tools()
+
+    assert tools == {}
+    assert "bwrap not found on PATH" in capsys.readouterr().err
 
 
 def test_build_tools_rejects_unusable_sandbox_config(
