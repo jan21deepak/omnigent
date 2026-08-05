@@ -924,6 +924,111 @@ async def test_auto_create_claude_terminal_inherits_agent_sandbox(
 
 
 @pytest.mark.asyncio
+async def test_auto_create_claude_terminal_records_sandbox_for_bridge_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The agent's sandbox reaches the bridge's workspace ``sys_os_*`` tools.
+
+    Those tools are built in the ``serve-mcp`` subprocess from
+    ``bridge.json`` alone, so a sandbox that only lives on the spec (e.g.
+    forced by the ``force_sandbox`` policy at ``sys_agent_start``) never
+    reaches them: shell/file tools then run with unrestricted host access
+    while the policy reports success.
+
+    :param tmp_path: Pytest-provided temporary directory.
+    :param monkeypatch: Pytest monkeypatch fixture.
+    """
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+
+    monkeypatch.setattr(claude_native_bridge, "_TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr(claude_native_bridge, "_BRIDGE_ROOT", tmp_path / "root")
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:8000")
+
+    async def _no_op_forwarder(**kwargs: Any) -> None:
+        del kwargs
+
+    monkeypatch.setattr(
+        "omnigent.claude_native_forwarder.supervise_forwarder",
+        _no_op_forwarder,
+    )
+
+    class _FakeResourceRegistry:
+        """Accepts the terminal launch without spawning anything."""
+
+        terminal_registry = None
+
+        async def launch_required_terminal(
+            self,
+            *,
+            session_id: str,
+            terminal_name: str,
+            session_key: str,
+            spec: Any,
+            resource_role: str | None = None,
+            parent_os_env: Any = None,
+        ) -> SessionResourceView:
+            """Return a resource view for the requested terminal."""
+            del terminal_name, session_key, spec, resource_role, parent_os_env
+            return SessionResourceView(
+                id="terminal_claude_main",
+                type="terminal",
+                session_id=session_id,
+                name="claude:main",
+                metadata={"terminal_name": "claude", "session_key": "main", "running": True},
+            )
+
+    fake_client = httpx.AsyncClient(
+        base_url="http://test-server",
+        transport=httpx.MockTransport(
+            lambda req: httpx.Response(200, json={"labels": {}}),
+        ),
+    )
+
+    # The spec the runner hands over here already carries the policy's
+    # forced sandbox (applied at the sys_agent_start gate).
+    agent_spec = AgentSpec(
+        spec_version=1,
+        name="claude_code",
+        executor=ExecutorSpec(
+            type="omnigent",
+            config={"harness": "claude-native", "model": "claude-default"},
+        ),
+        os_env=OSEnvSpec(
+            type="caller_process",
+            cwd=".",
+            sandbox=OSEnvSandboxSpec(
+                type="linux_bwrap",
+                write_paths=["."],
+                allow_network=False,
+            ),
+        ),
+    )
+
+    session_id = "e27fc87ef2a8d798895ce8c1e66db82d"
+    await _auto_create_claude_terminal(
+        session_id,
+        _FakeResourceRegistry(),
+        lambda _sid, _evt: None,
+        server_client=fake_client,
+        agent_spec=agent_spec,
+    )
+
+    config = json.loads(
+        (bridge_dir_for_bridge_id(session_id) / "bridge.json").read_text(encoding="utf-8")
+    )
+    assert config.get("sandbox", {}).get("type") == "linux_bwrap", (
+        "bridge.json carries no forced sandbox; the bridge's sys_os_* tools "
+        "will be built with sandbox 'none' regardless of policy"
+    )
+    assert config["sandbox"]["write_paths"] == ["."]
+    assert config["sandbox"]["allow_network"] is False
+
+    await fake_client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_auto_create_claude_terminal_injects_ucode_gateway_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
