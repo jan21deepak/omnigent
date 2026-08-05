@@ -301,10 +301,9 @@ function reusablePrefix(
     return null;
   }
   const startBlock = cache.lastBubbleStart;
-  // Never resume a walk AT a routing-decision chip. A later reply delta
-  // for the same response turns that standalone chip into a mid-reply card
-  // that must hoist above the reply — but the top-level rewalk would re-emit
-  // it standalone and split the reply. Rebuild from scratch instead.
+  // Never resume a walk AT a routing-decision chip: a later same-response
+  // delta must hoist it above the reply, but a rewalk would re-emit it
+  // standalone and split the reply. Rebuild from scratch instead.
   if (blocks[startBlock]?.type === "routing_decision") return null;
   // The new array must be at least as long, and the finalized prefix
   // region must be byte-for-byte (reference-for-reference) unchanged.
@@ -422,11 +421,9 @@ function walkBubbles(
   }
   // Block index where the most recently pushed bubble's group started.
   let lastBubbleStart = bubbles.length > 0 ? 0 : -1;
-  // Whether the most recently pushed assistant group hoisted a mid-reply
-  // routing chip above itself (emitting >1 bubble in one step). The
-  // incremental cache reuses all-but-the-last bubble and rewalks from
-  // `lastBubbleStart`; a hoisted chip in the FINAL group breaks that
-  // one-bubble assumption, so we disable reuse for the next call.
+  // Set when the final assistant group hoisted a mid-reply routing chip
+  // (emitting >1 bubble): the cache's one-bubble reuse assumption no longer
+  // holds, so reuse is disabled for the next call (see the end of the walk).
   let lastGroupHoisted = false;
   let i = startIndex;
 

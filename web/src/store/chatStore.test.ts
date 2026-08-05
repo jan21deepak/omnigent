@@ -2227,6 +2227,67 @@ describe("chatStore — send while streaming (queueing)", () => {
     expect(state.blocks.filter((b) => b.type === "user_message")).toHaveLength(0);
   });
 
+  it("tail-appends (not head-inserts) a send while only ephemeral blocks are on screen", async () => {
+    // Mid-stream the newest block is an unfinalized chunk with itemId=null.
+    // The send anchor must be `undefined` (tail append), not `null` (which
+    // insertUserBlockAtAnchor treats as head-insert and would fling the
+    // message above the entire earlier transcript once it commits).
+    const streamingChunk: AnyBlock = {
+      type: "text_chunk",
+      ctx: {
+        agent: null,
+        depth: 0,
+        turn: 0,
+        timestamp: 0,
+        responseId: "resp_in_flight",
+        itemId: null,
+      },
+      text: "partial reply",
+    };
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      abortController: new AbortController(),
+      status: "streaming",
+      activeResponse: { responseId: "resp_in_flight", state: "streaming", error: null },
+      blocks: [streamingChunk],
+    });
+
+    const sendDone = useChatStore.getState().send("later", "agent_xyz");
+    // anchorAfterKey is computed synchronously before any network work.
+    const pending = useChatStore.getState().pendingUserMessages;
+    expect(pending.at(-1)!.anchorAfterKey).toBeUndefined();
+    await sendDone;
+  });
+
+  it("tail-appends a send while an in-flight reply is streaming after an earlier turn", async () => {
+    // Newest block is an unfinalized chunk of turn 2's reply; the scan must
+    // stop there (undefined → tail append), not walk back to turn 1's user
+    // message and drop the new message above the whole turn-2 reply.
+    const mkBlock = (type: AnyBlock["type"], itemId: string | null, extra: object): AnyBlock =>
+      ({
+        type,
+        ctx: { agent: null, depth: 0, turn: 0, timestamp: 0, responseId: "resp_2", itemId },
+        ...extra,
+      }) as AnyBlock;
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      abortController: new AbortController(),
+      status: "streaming",
+      activeResponse: { responseId: "resp_2", state: "streaming", error: null },
+      blocks: [
+        mkBlock("user_message", "msg_a", { content: [{ type: "input_text", text: "A" }] }),
+        mkBlock("text_done", "msg_r1", { fullText: "reply 1", hasCodeBlocks: false }),
+        mkBlock("response_end", null, { status: "completed" }),
+        mkBlock("user_message", "msg_b", { content: [{ type: "input_text", text: "B" }] }),
+        mkBlock("text_chunk", null, { text: "reply 2 so far" }),
+      ],
+    });
+
+    const sendDone = useChatStore.getState().send("C", "agent_xyz");
+    expect(useChatStore.getState().pendingUserMessages.at(-1)!.anchorAfterKey).toBeUndefined();
+    await sendDone;
+  });
+
   it("rolls back the pending entry when the queue POST fails", async () => {
     useChatStore.setState({
       conversationId: "conv_abc",
@@ -4232,11 +4293,11 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       expect((state.blocks[0] as UserMessageBlock).ctx.itemId).toBe("msg_hi");
     });
 
-    it("inserts the promoted block at its wire position (anchorIndex), not the tail", () => {
+    it("inserts the promoted block at its wire position (anchorAfterKey), not the tail", () => {
       // Smart-routing live-order regression: a routing card and the first
       // reply deltas commit WHILE the user message is still optimistic.
-      // The pending entry recorded anchorIndex=0 (no committed blocks at
-      // send time), so promotion inserts the user_message at index 0 —
+      // The pending entry recorded anchorAfterKey=null (empty transcript at
+      // send time), so promotion inserts the user_message at the head —
       // above the card and reply — instead of appending below them.
       const routingCard: AnyBlock = {
         type: "routing_decision",
@@ -4268,7 +4329,7 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       useChatStore.setState({
         blocks: [routingCard, replyDelta],
         pendingUserMessages: [
-          { tempId: "pend_1", content: [{ type: "input_text", text: "hi" }], anchorIndex: 0 },
+          { tempId: "pend_1", content: [{ type: "input_text", text: "hi" }], anchorAfterKey: null },
         ],
       });
 
@@ -4309,7 +4370,7 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       useChatStore.setState({
         blocks: [committed],
         pendingUserMessages: [
-          { tempId: "pend_1", content: [{ type: "input_text", text: "hi" }], anchorIndex: 0 },
+          { tempId: "pend_1", content: [{ type: "input_text", text: "hi" }], anchorAfterKey: null },
         ],
       });
 
@@ -4324,6 +4385,107 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       const state = useChatStore.getState();
       // No duplicate block appended, and the stranded pending entry is gone.
       expect(state.blocks).toEqual([committed]);
+      expect(state.pendingUserMessages).toEqual([]);
+    });
+
+    it("keeps two back-to-back messages in send order when both promote", () => {
+      // Both were optimistic at the same time. The second chained its anchor
+      // to the first's tempId, so promoting the first (at the head) then the
+      // second lands the second AFTER the first — not above it (the reversal
+      // an absolute index would cause when both recorded the same slot).
+      useChatStore.setState({
+        blocks: [],
+        pendingUserMessages: [
+          {
+            tempId: "pend_1",
+            content: [{ type: "input_text", text: "first" }],
+            anchorAfterKey: null,
+          },
+          {
+            tempId: "pend_2",
+            content: [{ type: "input_text", text: "second" }],
+            anchorAfterKey: "pend_1",
+          },
+        ],
+      });
+
+      handleSessionEvent({
+        type: "session_input_consumed",
+        itemId: "msg_1",
+        itemType: "message",
+        clearedPendingId: "pend_1",
+        data: { role: "user", content: [{ type: "input_text", text: "first" }] },
+      });
+      handleSessionEvent({
+        type: "session_input_consumed",
+        itemId: "msg_2",
+        itemType: "message",
+        clearedPendingId: "pend_2",
+        data: { role: "user", content: [{ type: "input_text", text: "second" }] },
+      });
+
+      const state = useChatStore.getState();
+      expect(state.blocks.map((b) => b.ctx.itemId)).toEqual(["msg_1", "msg_2"]);
+      expect(state.pendingUserMessages).toEqual([]);
+    });
+
+    it("resolves the anchor by identity after older history is prepended", () => {
+      // The wire position is a block id, not a raw index, so prepending an
+      // older history page while the message is optimistic does not shift it
+      // into the middle of that history — it still lands after its anchor.
+      const anchor: AnyBlock = {
+        type: "text_done",
+        ctx: {
+          agent: null,
+          depth: 0,
+          turn: 0,
+          timestamp: 0,
+          responseId: "resp_0",
+          itemId: "anchor_block",
+        },
+        fullText: "prev reply",
+        hasCodeBlocks: false,
+      };
+      const older: AnyBlock = {
+        type: "text_done",
+        ctx: {
+          agent: null,
+          depth: 0,
+          turn: 0,
+          timestamp: 0,
+          responseId: "resp_old",
+          itemId: "older_block",
+        },
+        fullText: "older history",
+        hasCodeBlocks: false,
+      };
+      // Anchor recorded at send (blocks were [anchor]); then an older page is
+      // prepended, so an index-based anchor would now point into old history.
+      useChatStore.setState({
+        blocks: [older, anchor],
+        pendingUserMessages: [
+          {
+            tempId: "pend_1",
+            content: [{ type: "input_text", text: "hi" }],
+            anchorAfterKey: "anchor_block",
+          },
+        ],
+      });
+
+      handleSessionEvent({
+        type: "session_input_consumed",
+        itemId: "msg_user",
+        itemType: "message",
+        clearedPendingId: "pend_1",
+        data: { role: "user", content: [{ type: "input_text", text: "hi" }] },
+      });
+
+      const state = useChatStore.getState();
+      expect(state.blocks.map((b) => b.ctx.itemId)).toEqual([
+        "older_block",
+        "anchor_block",
+        "msg_user",
+      ]);
       expect(state.pendingUserMessages).toEqual([]);
     });
   });
