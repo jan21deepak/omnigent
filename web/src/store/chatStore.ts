@@ -147,15 +147,17 @@ export interface PendingUserMessage {
    */
   posted?: boolean;
   /**
-   * The message's wire position: how many committed `blocks` existed when
-   * this message was sent. The consumed handler inserts the promoted
-   * committed block at this index instead of appending, so blocks that
-   * commit AFTER the send (a routing-decision card, the first streamed
-   * reply deltas) render below the user message instead of above it — the
-   * out-of-order live render this fixes. Unset on snapshot-replayed
-   * entries, which reconcile at the tail (append) as before.
+   * The message's wire position, as the *identity* of the block it should
+   * follow (not a raw index, which prepended history or an earlier sibling's
+   * promotion would invalidate). The consumed handler inserts the promoted
+   * block right after this key, so blocks that commit AFTER the send (a
+   * routing card, the first reply deltas) render below the message. Set to
+   * the last block's id at send time, or the preceding pending message's
+   * `tempId` when one is still optimistic (chaining keeps sibling order).
+   * `null` means the transcript was empty at send (insert at the head);
+   * unset on snapshot-replayed entries, which reconcile at the tail as before.
    */
-  anchorIndex?: number;
+  anchorAfterKey?: string | null;
 }
 
 /**
@@ -1200,11 +1202,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         {
           tempId,
           content,
-          // Wire position: committed blocks at send time. The consumed
-          // handler inserts the promoted block here so a routing card or
-          // early reply delta that commits during the turn lands below
-          // this message rather than above it.
-          anchorIndex: s.blocks.length,
+          // Wire position by block identity, so a routing card or early
+          // reply delta committing during the turn lands below this message.
+          anchorAfterKey: anchorKeyForSend(s.pendingUserMessages, s.blocks),
           ...(selfAuthor !== null ? { author: selfAuthor } : {}),
         },
       ],
@@ -3830,26 +3830,51 @@ function committedUserBlock(
   };
 }
 
+/** Stable identity for anchoring: the committed item id, else a user block's optimistic stableKey. */
+function blockAnchorKey(b: AnyBlock): string | undefined {
+  return b.ctx.itemId ?? (b.type === "user_message" ? b.stableKey : undefined);
+}
+
+/** Whether a block is the one an `anchorAfterKey` names (by item id or promoted-sibling stableKey). */
+function blockMatchesAnchorKey(b: AnyBlock, key: string): boolean {
+  return b.ctx.itemId === key || (b.type === "user_message" && b.stableKey === key);
+}
+
 /**
- * Insert a promoted user block at its wire position (`anchorIndex`) so it
- * keeps a stable place in the live transcript. Blocks that committed after
- * the send — a routing-decision card, the first streamed reply deltas —
- * already sit at indices >= the anchor, so inserting there renders them
- * below the user message instead of above it.
- *
- * The anchor is clamped to `[0, blocks.length]`. A missing anchor
- * (snapshot-replayed entries) or an out-of-range one falls back to a tail
- * append — the historical behaviour.
+ * The `anchorAfterKey` for a message being sent: the preceding optimistic
+ * message's `tempId` when one is still pending (chaining keeps sibling order
+ * across promotions), else the last committed block's identity, else `null`
+ * for an empty transcript (insert at the head).
+ */
+function anchorKeyForSend(pending: PendingUserMessage[], blocks: AnyBlock[]): string | null {
+  const lastPending = pending[pending.length - 1];
+  if (lastPending) return lastPending.tempId;
+  const lastBlock = blocks[blocks.length - 1];
+  return lastBlock ? (blockAnchorKey(lastBlock) ?? null) : null;
+}
+
+/**
+ * Insert a promoted user block at its wire position so it keeps a stable
+ * place in the live transcript. It lands right after the block identified by
+ * `anchorAfterKey`, so blocks that committed after the send (a routing card,
+ * the first reply deltas) render below it. `null` inserts at the head (empty
+ * transcript at send); `undefined` or an unresolvable key falls back to a
+ * tail append — the historical behaviour for snapshot-replayed entries.
  */
 function insertUserBlockAtAnchor(
   blocks: AnyBlock[],
   block: UserMessageBlock,
-  anchorIndex: number | undefined,
+  anchorAfterKey: string | null | undefined,
 ): AnyBlock[] {
-  if (anchorIndex === undefined || anchorIndex >= blocks.length) {
-    return [...blocks, block];
+  if (anchorAfterKey === null) return [block, ...blocks];
+  if (anchorAfterKey === undefined) return [...blocks, block];
+  let at = blocks.length;
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    if (blockMatchesAnchorKey(blocks[i]!, anchorAfterKey)) {
+      at = i + 1;
+      break;
+    }
   }
-  const at = Math.max(anchorIndex, 0);
   return [...blocks.slice(0, at), block, ...blocks.slice(at)];
 }
 
@@ -4417,10 +4442,8 @@ export function handleSessionEvent(event: StreamEvent): void {
       //      the drop and strand the bubble as a duplicate.
       //   3. No pending entry — render the event payload as a fresh
       //      committed bubble (TUI-typed message, or another client).
-      // The promoted block lands at its matched entry's wire position
-      // (`anchorIndex`), not the tail, so blocks that committed while the
-      // message was still optimistic (a routing card, early reply deltas)
-      // render below it — see `insertUserBlockAtAnchor`.
+      // The promoted block lands at its matched entry's wire position, not
+      // the tail — see `insertUserBlockAtAnchor`.
       useChatStore.setState((s) => {
         // Locate the optimistic entry this event drained: by the
         // server-named id first (precise across rebinds), else the FIFO
@@ -4464,7 +4487,7 @@ export function handleSessionEvent(event: StreamEvent): void {
                 matched.tempId,
                 event.createdBy ?? matched.author,
               ),
-              matched.anchorIndex,
+              matched.anchorAfterKey,
             ),
           };
         }
