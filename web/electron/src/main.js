@@ -2019,10 +2019,12 @@ function createBrowserRegistryForWindow(win) {
   });
   // Overlay suppression is ref-counted in the renderer, and a reload wipes that
   // count without releasing outstanding leases — clear it on every top-level
-  // navigation so the active view can't stay hidden forever.
+  // document navigation so the active view can't stay hidden forever.
   try {
-    win.webContents.on("did-start-navigation", (_event, _url, _isInPlace, isMainFrame) => {
-      if (isMainFrame) registry.setOverlaySuppressed(false);
+    win.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+      // Skip in-place (SPA route) navigations: the renderer's leases survive
+      // those, so clearing would uncover a still-open overlay.
+      if (isMainFrame && !isInPlace) registry.setOverlaySuppressed(false);
     });
   } catch {
     /* window torn down */
