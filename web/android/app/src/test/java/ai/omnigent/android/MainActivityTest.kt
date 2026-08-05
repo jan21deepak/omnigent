@@ -1,6 +1,8 @@
 package ai.omnigent.android
 
 import android.content.res.Configuration
+import android.view.View
+import android.view.ViewGroup
 import android.webkit.WebView
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.test.core.app.ApplicationProvider
@@ -11,6 +13,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
@@ -75,6 +78,30 @@ class MainActivityTest {
         assertTrue(insetsController.isAppearanceLightStatusBars)
         assertTrue(insetsController.isAppearanceLightNavigationBars)
     }
+
+    @Test
+    fun `server switcher pill gets a 48dp tall touch target`() {
+        ServerStore(ApplicationProvider.getApplicationContext()).connect("https://example.com")
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        val pill = activity.switchButton()
+        val container = pill.parent as ViewGroup
+        val density = activity.resources.displayMetrics.density
+
+        pill.layout(100, 40, 220, 40 + (27 * density).toInt())
+
+        val delegate = shadowOf(container.touchDelegate)
+        assertEquals(pill, delegate.delegateView)
+        assertEquals(pill.left, delegate.bounds.left)
+        assertEquals(pill.top, delegate.bounds.top)
+        assertEquals((48 * density).toInt(), delegate.bounds.height())
+    }
+
+    private fun MainActivity.switchButton(): View =
+        MainActivity::class
+            .java
+            .getDeclaredField("switchButton")
+            .apply { isAccessible = true }
+            .get(this) as View
 
     private fun MainActivity.webView(): WebView =
         MainActivity::class
