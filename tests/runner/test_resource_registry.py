@@ -190,6 +190,7 @@ async def test_terminal_resource_role_is_private_and_cleared_on_close(
         conversation_id: str,
         terminal_name: str,
         session_key: str,
+        **kwargs: object,
     ) -> bool:
         """
         Remove the fake terminal from the registry.
@@ -197,8 +198,10 @@ async def test_terminal_resource_role_is_private_and_cleared_on_close(
         :param conversation_id: Owning session id, e.g. ``"conv_codex"``.
         :param terminal_name: Terminal name, e.g. ``"codex"``.
         :param session_key: Terminal session key, e.g. ``"main"``.
+        :param kwargs: Additional close kwargs, e.g. ``expected_instance``.
         :returns: ``True`` when the fake terminal existed.
         """
+        del kwargs
         slot = terminal_registry._by_conversation.get(conversation_id, {})
         return slot.pop((terminal_name, session_key), None) is not None
 
@@ -1082,3 +1085,113 @@ def test_resolve_environment_runner_workspace_overrides_absolute_spec_cwd(
     # Compare via realpath because tmp_path on macOS goes through
     # /var → /private/var symlinks.
     assert os.path.realpath(env.cwd) == os.path.realpath(workspace)
+
+
+@pytest.mark.asyncio
+async def test_stale_terminal_exit_leaves_replacement_terminal_alone(tmp_path: Path) -> None:
+    """A deferred exit cleanup must not evict a replacement terminal.
+
+    Exit cleanup runs as a detached task, so the ensure path can install a
+    replacement terminal under the same key while the exited terminal's close
+    is still in flight. Cleanup keyed only by the terminal key would then evict
+    the replacement's registry entry, role and lifecycle, and publish a
+    deletion naming the live replacement's resource id.
+
+    :param tmp_path: Temporary directory for fake terminal paths.
+    """
+    terminal_registry = TerminalRegistry()
+    registry = SessionResourceRegistry(terminal_registry=terminal_registry)
+    exited = make_test_terminal_instance("codex", "main", tmp_path)
+    replacement = make_test_terminal_instance("codex", "main", tmp_path / "replacement")
+    terminal_registry._by_conversation.setdefault("conv_stale", {})[("codex", "main")] = exited
+    exits: list[TerminalExitEvent] = []
+    callbacks: dict[str, object] = {}
+    closing = asyncio.Event()
+    release_close = asyncio.Event()
+
+    async def _blocking_close() -> None:
+        """Park inside the exited terminal's close, after key removal."""
+        closing.set()
+        await release_close.wait()
+
+    def _capture_watcher(
+        on_idle: object | None = None,
+        *,
+        on_activity: object | None = None,
+        on_exit: object | None = None,
+        idle_threshold_s: float | None = None,
+        poll_interval_s: float | None = None,
+        replace: bool = False,
+    ) -> None:
+        del on_idle, on_activity, idle_threshold_s, poll_interval_s, replace
+        callbacks.setdefault("on_exit", on_exit)
+
+    exited.close = _blocking_close  # type: ignore[method-assign]
+    exited.start_idle_watcher_thread = _capture_watcher  # type: ignore[method-assign]
+    replacement.start_idle_watcher_thread = _capture_watcher  # type: ignore[method-assign]
+    registry.set_terminal_exit_publisher(exits.append)
+
+    await registry.observe_required_terminal(
+        "conv_stale",
+        "codex",
+        "main",
+        exited,
+        resource_role=CODEX_NATIVE_TERMINAL_ROLE,
+    )
+    on_exit = callbacks["on_exit"]
+    assert callable(on_exit)
+    on_exit()
+    await asyncio.wait_for(closing.wait(), timeout=1.0)
+
+    # The ordinary ensure path installs a replacement while cleanup is parked.
+    terminal_registry._by_conversation.setdefault("conv_stale", {})[("codex", "main")] = (
+        replacement
+    )
+    await registry.observe_required_terminal(
+        "conv_stale",
+        "codex",
+        "main",
+        replacement,
+        resource_role=CODEX_NATIVE_TERMINAL_ROLE,
+    )
+
+    release_close.set()
+    await asyncio.wait_for(registry.wait_for_terminal_exit_cleanup(), timeout=1.0)
+
+    assert terminal_registry.get("conv_stale", "codex", "main") is replacement
+    assert (
+        registry.terminal_resource_role("conv_stale", "terminal_codex_main")
+        == CODEX_NATIVE_TERMINAL_ROLE
+    )
+    assert exits == [], (
+        "A stale exit must not publish a deletion for the replacement's resource id."
+    )
+
+
+@pytest.mark.asyncio
+async def test_close_terminal_scoped_to_instance_spares_replacement(tmp_path: Path) -> None:
+    """A close decided from an earlier observation cannot close a replacement.
+
+    The idle pane reaper selects a pane, then closes it by resource id. When a
+    new turn re-creates the pane in that interval, an id-keyed close would take
+    down the fresh pane the turn is using; the instance-scoped close reports
+    that nothing of its own was closed instead.
+
+    :param tmp_path: Temporary directory for fake terminal paths.
+    """
+    terminal_registry = TerminalRegistry()
+    registry = SessionResourceRegistry(terminal_registry=terminal_registry)
+    reaped = make_test_terminal_instance("claude", "main", tmp_path)
+    replacement = make_test_terminal_instance("claude", "main", tmp_path / "replacement")
+    terminal_registry._by_conversation.setdefault("conv_reap", {})[("claude", "main")] = (
+        replacement
+    )
+
+    closed = await registry.close_terminal(
+        "conv_reap",
+        "terminal_claude_main",
+        expected_instance=reaped,
+    )
+
+    assert closed is False
+    assert terminal_registry.get("conv_reap", "claude", "main") is replacement

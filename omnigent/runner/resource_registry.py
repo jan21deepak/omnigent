@@ -1146,6 +1146,41 @@ class SessionResourceRegistry:
             replace=replace,
         )
 
+    def _superseded_by_replacement(
+        self,
+        session_id: str,
+        terminal_name: str,
+        session_key: str,
+        instance: TerminalInstance | None,
+    ) -> bool:
+        """Report whether a newer terminal already owns *instance*'s key.
+
+        Terminal-exit cleanup runs as a detached task, so an ensure path can
+        install a replacement terminal under the same key before the cleanup
+        gets to run. Cleanup that observed one terminal must leave that
+        replacement — and the resources built around it — alone.
+
+        :param session_id: Session/conversation identifier.
+        :param terminal_name: Terminal spec name.
+        :param session_key: Per-launch terminal key.
+        :param instance: The terminal instance the cleanup observed, or
+            ``None`` when the caller has no identity to compare.
+        :returns: ``True`` when a different instance holds the key.
+        """
+        if instance is None or self._terminal_registry is None:
+            return False
+        current = self._terminal_registry.get(session_id, terminal_name, session_key)
+        if current is None or current is instance:
+            return False
+        _logger.info(
+            "Skipping stale terminal cleanup; a replacement holds the key: "
+            "session=%s terminal=%s:%s",
+            session_id,
+            terminal_name,
+            session_key,
+        )
+        return True
+
     async def _handle_terminal_exit(
         self,
         *,
@@ -1157,9 +1192,10 @@ class SessionResourceRegistry:
     ) -> None:
         """Clean up and publish lifecycle events for an unexpected terminal exit."""
         terminal_id = terminal_resource_id(terminal_name, session_key)
+        if self._superseded_by_replacement(session_id, terminal_name, session_key, instance):
+            return
         with self._lock:
-            observed = self._terminal_lifecycles.pop((session_id, terminal_id), None)
-            self._terminal_roles.pop((session_id, terminal_id), None)
+            observed = self._terminal_lifecycles.get((session_id, terminal_id))
         if observed is None:
             return
         if observed != lifecycle:
@@ -1175,13 +1211,15 @@ class SessionResourceRegistry:
             lifecycle = observed
 
         command, args_count, cwd, last_output = _terminal_exit_diagnostics(instance)
-        # Idle = clean shutdown after the turn finished. Anything else (running,
-        # or never observed → boot failure) stays a failure.
-        session_was_idle = self._take_session_status_memo(session_id) == "idle"
 
         if self._terminal_registry is not None:
             try:
-                await self._terminal_registry.close(session_id, terminal_name, session_key)
+                await self._terminal_registry.close(
+                    session_id,
+                    terminal_name,
+                    session_key,
+                    expected_instance=instance,
+                )
             except Exception:
                 _logger.exception(
                     "Error evicting exited terminal: session=%s terminal=%s:%s",
@@ -1189,6 +1227,20 @@ class SessionResourceRegistry:
                     terminal_name,
                     session_key,
                 )
+
+        # The close above yields, so re-check ownership: a replacement
+        # installed meanwhile owns the key, the resource id and the session
+        # status — none of them may be evicted or reported deleted here.
+        if self._superseded_by_replacement(session_id, terminal_name, session_key, instance):
+            return
+        with self._lock:
+            evicted = self._terminal_lifecycles.pop((session_id, terminal_id), None)
+            self._terminal_roles.pop((session_id, terminal_id), None)
+        if evicted is None:
+            return
+        # Idle = clean shutdown after the turn finished. Anything else (running,
+        # or never observed → boot failure) stays a failure.
+        session_was_idle = self._take_session_status_memo(session_id) == "idle"
 
         publisher = self._terminal_exit_publisher
         if publisher is not None:
@@ -1211,11 +1263,17 @@ class SessionResourceRegistry:
         self,
         session_id: str,
         terminal_id: str,
+        *,
+        expected_instance: TerminalInstance | None = None,
     ) -> bool:
         """Close a terminal resource by id.
 
         :param session_id: Session/conversation identifier.
         :param terminal_id: Opaque terminal resource id.
+        :param expected_instance: When given, close only if this exact
+            instance still holds the resource id. Callers that decided to
+            close based on an earlier observation (the idle pane reaper) pass
+            the instance they observed so a replacement is never closed.
         :returns: ``True`` if a terminal was closed.
         """
         if self._terminal_registry is None:
@@ -1225,10 +1283,13 @@ class SessionResourceRegistry:
             session_id,
         ):
             if terminal_resource_id(entry.terminal_name, entry.session_key) == terminal_id:
+                if expected_instance is not None and entry.instance is not expected_instance:
+                    return False
                 closed = await self._terminal_registry.close(
                     session_id,
                     entry.terminal_name,
                     entry.session_key,
+                    expected_instance=expected_instance,
                 )
                 if closed:
                     with self._lock:
