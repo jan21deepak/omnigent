@@ -7712,6 +7712,68 @@ def _host_markup(text: _HostJsonValue, *, missing: str = "-") -> str:
     return escape(_host_display_value(text, missing=missing))
 
 
+def _host_link_target(value: _HostJsonValue) -> str | None:
+    """
+    Return a click target for a payload value, if it is linkable.
+
+    Absolute filesystem paths become ``file://`` URIs so daemon log paths
+    are clickable too.
+
+    :param value: Payload value, e.g. ``"https://example.com"`` or
+        ``"/Users/example/.omnigent/logs/host.log"``.
+    :returns: A URL usable as an OSC 8 click target, or ``None``.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.strip()
+    # Markup and OSC 8 both break on these; a guessed link is worse than none.
+    if not text or any(char in text for char in " \t\n\r[]"):
+        return None
+    if text.startswith(("http://", "https://", "file://")):
+        return text
+    path = Path(text)
+    if path.is_absolute():
+        return path.as_uri()
+    return None
+
+
+def _host_link_markup(value: _HostJsonValue, *, max_chars: int, shorten: bool = True) -> str:
+    """
+    Render a URL or path as an explicit hyperlink with shortened display text.
+
+    The displayed text may be truncated to fit the terminal, but the click
+    target always carries the full value, so terminals never have to guess
+    where the link starts and ends.
+
+    :param value: Value to render, e.g. a server URL or daemon log path.
+    :param max_chars: Maximum display width, e.g. ``60``.
+    :param shorten: Whether to middle-truncate rather than right-truncate.
+    :returns: Rich markup for the value.
+    """
+    display = (
+        _host_shorten(value, max_chars=max_chars)
+        if shorten
+        else _host_truncate(value, max_chars=max_chars)
+    )
+    target = _host_link_target(value)
+    if target is None:
+        return _host_markup(display)
+    return f"[link={target}]{_host_markup(display)}[/link]"
+
+
+def _host_print_line(console: Console, markup: str) -> None:
+    """
+    Print one status line without soft-wrapping it.
+
+    Terminals treat soft-wrapped rows as a single logical line when detecting
+    links, which merges neighbouring status text into one click target.
+
+    :param console: Rich console returned by :func:`_host_console`.
+    :param markup: Rich markup for the line.
+    """
+    console.print(markup, no_wrap=True, overflow="ellipsis", crop=True)
+
+
 def _host_target_label(payload: _HostPayload, *, width: int) -> str:
     """
     Build a compact daemon target label.
@@ -7876,28 +7938,40 @@ def _echo_daemon_payloads(payloads: list[_HostPayload]) -> None:
         target = _host_target_label(payload, width=max(24, min(console.width - 2, 96)))
         process = _host_display_value(payload.get("process"), missing="unknown")
         host_status = _host_display_value(payload.get("host_status"), missing="unknown")
-        console.print(f"[bold cyan]{_host_markup(target)}[/bold cyan]")
-        console.print(
+        target_link = _host_link_target(payload.get("target")) or _host_link_target(
+            payload.get("server_url")
+        )
+        header = _host_markup(target)
+        if target_link is not None:
+            header = f"[link={target_link}]{header}[/link]"
+        _host_print_line(console, f"[bold cyan]{header}[/bold cyan]")
+        _host_print_line(
+            console,
             "  "
             f"mode={_host_markup(payload.get('mode'))}  "
             f"pid={_host_markup(payload.get('pid'))}  "
             f"process=[{_host_status_style(process)}]{process}[/]  "
-            f"host=[{_host_status_style(host_status)}]{host_status}[/]"
+            f"host=[{_host_status_style(host_status)}]{host_status}[/]",
         )
-        server_text = _host_shorten(
+        server_markup = _host_link_markup(
             payload.get("server_url"),
             max_chars=max(24, console.width - 11),
         )
-        console.print(f"  server={_host_markup(server_text)}")
-        console.print(f"  host_id={_host_markup(payload.get('host_id'))}")
+        _host_print_line(console, f"  server={server_markup}")
+        host_id = _host_shorten(payload.get("host_id"), max_chars=max(24, console.width - 12))
+        _host_print_line(console, f"  host_id={_host_markup(host_id)}")
         if payload.get("log_path"):
-            console.print(f"  log={_host_markup(payload.get('log_path'))}")
+            log_markup = _host_link_markup(
+                payload.get("log_path"),
+                max_chars=max(24, console.width - 8),
+            )
+            _host_print_line(console, f"  log={log_markup}")
         if payload.get("error"):
             message = _host_truncate(
                 payload.get("error"),
                 max_chars=max(24, console.width - 10),
             )
-            console.print(f"  [red]error={_host_markup(message)}[/red]")
+            _host_print_line(console, f"  [red]error={_host_markup(message)}[/red]")
         _add_host_payload_sessions_table(console, payload)
 
 
