@@ -11,6 +11,9 @@ vi.mock("@/lib/nativeBridge", () => ({
   // DialogContent (rendered here) reads isIOSShell to size modals for the iOS
   // keyboard; this suite exercises the browser path, so it's always false.
   isIOSShell: () => false,
+  // DialogOverlay hides the desktop shell's native browser view while a dialog
+  // is up; outside Electron it's a no-op.
+  setBrowserOverlaySuppressed: () => Promise.resolve(),
 }));
 
 beforeEach(() => {

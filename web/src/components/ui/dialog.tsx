@@ -1,6 +1,7 @@
 import * as React from "react";
 import * as DialogPrimitive from "radix-ui/dialog";
 
+import { useSuppressBrowserView } from "@/hooks/useSuppressBrowserView";
 import { getEmbedRoot } from "@/lib/host";
 import { isIOSShell } from "@/lib/nativeBridge";
 import { cn } from "@/lib/utils";
@@ -33,6 +34,10 @@ function DialogOverlay({
   className,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Overlay>) {
+  // Every Radix dialog in the app renders this overlay, so hiding the desktop
+  // shell's native browser view here covers them all — otherwise the view
+  // paints over the dialog and it opens invisibly underneath.
+  useSuppressBrowserView(true);
   return (
     <DialogPrimitive.Overlay
       data-slot="dialog-overlay"

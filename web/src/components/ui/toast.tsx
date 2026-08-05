@@ -12,6 +12,8 @@
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { XIcon } from "lucide-react";
 
+import { useSuppressBrowserView } from "@/hooks/useSuppressBrowserView";
+
 const TOAST_EVENT = "omnigent:toast";
 const DEFAULT_DURATION_MS = 6000;
 
@@ -51,6 +53,10 @@ export function Toaster() {
     window.addEventListener(TOAST_EVENT, onToast);
     return () => window.removeEventListener(TOAST_EVENT, onToast);
   }, []);
+
+  // Toasts sit in the DOM, which the desktop shell's native browser view paints
+  // over; hide that view while any toast is on screen.
+  useSuppressBrowserView(toasts.length > 0);
 
   if (toasts.length === 0) return null;
 
