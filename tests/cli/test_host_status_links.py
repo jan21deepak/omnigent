@@ -14,14 +14,14 @@ _SERVER_URL = "https://omnigent-9775947-fe-vm-fe-randy-pitch-4.aws.databricksapp
 _LOG_PATH = "/Users/example/.omnigent/logs/host/host-20260801-074914-755244.log"
 
 
-def _render(monkeypatch: pytest.MonkeyPatch, *, width: int) -> str:
+def _render(monkeypatch: pytest.MonkeyPatch, *, width: int, terminal: bool = True) -> str:
     """Render one daemon payload through a narrow terminal-like console."""
     stream = io.StringIO()
     console = Console(
         file=stream,
         width=width,
-        force_terminal=True,
-        color_system="truecolor",
+        force_terminal=terminal or None,
+        color_system="truecolor" if terminal else None,
         highlight=False,
     )
     monkeypatch.setattr(cli, "_host_console", lambda: console)
@@ -65,6 +65,16 @@ def test_status_lines_never_soft_wrap(monkeypatch: pytest.MonkeyPatch) -> None:
 
     for line in output.splitlines():
         assert len(Text.from_ansi(line).plain) <= 60
+
+
+def test_redirected_output_keeps_full_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Piped or redirected output is not shortened: there is no link to protect."""
+    output = _render(monkeypatch, width=60, terminal=False)
+
+    unwrapped = output.replace("\n", "")
+    assert _SERVER_URL in unwrapped
+    assert _LOG_PATH in unwrapped
+    assert "…" not in output
 
 
 def test_relative_values_are_not_linked() -> None:
