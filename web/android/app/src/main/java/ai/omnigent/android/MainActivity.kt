@@ -6,11 +6,13 @@ import android.app.DownloadManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.view.Gravity
+import android.view.TouchDelegate
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -185,6 +187,7 @@ class MainActivity : AppCompatActivity() {
                     topMargin = (8 * dp).toInt()
                 }
         container.addView(switchButton)
+        expandSwitchButtonTouchTarget(container)
         setContentView(container)
         applySystemBarContrast()
         installBridge()
@@ -544,6 +547,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Grow the pill's hit rect to the 48dp minimum tap target without changing
+     * how it looks. Only downward: upward would reach into the status bar and
+     * sideways would re-cover the web chrome beside the pill.
+     */
+    private fun expandSwitchButtonTouchTarget(container: FrameLayout) {
+        val minHeight = (MIN_TAP_TARGET_DP * resources.displayMetrics.density).toInt()
+        switchButton.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            val hitRect = Rect()
+            switchButton.getHitRect(hitRect)
+            if (hitRect.height() < minHeight) hitRect.bottom = hitRect.top + minHeight
+            container.touchDelegate = TouchDelegate(hitRect, switchButton)
+        }
+    }
+
+    /**
      * Show the server-switcher dropdown menu, mirroring the iOS `ServerSwitcher`
      * `Menu`. Lists the current server (disabled header), other recent servers,
      * Reload, and Connect to New Server. Tapping a recent server switches
@@ -781,6 +799,9 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         const val MAX_LOGIN_ATTEMPTS = 3
+
+        // Android's recommended minimum interactive target size.
+        const val MIN_TAP_TARGET_DP = 48
 
         // Back-press fallback: long enough that a healthy renderer's JS round-trip
         // (a few ms) always wins the race, short enough to not feel stuck if it
