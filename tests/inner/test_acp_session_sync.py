@@ -14,11 +14,13 @@ Two layers:
 from __future__ import annotations
 
 import json
+import multiprocessing
 import shlex
 import sys
 from pathlib import Path
 
 import pytest
+from starlette.testclient import TestClient
 
 from omnigent.inner.acp_executor import AcpAgentConfig, AcpExecutor
 from omnigent.inner.acp_session_sync import (
@@ -32,6 +34,8 @@ from omnigent.inner.acp_session_sync import (
     missed_turns,
 )
 from omnigent.inner.executor import TextChunk, TurnComplete
+from omnigent.runtime.harnesses._executor_adapter import ExecutorAdapter
+from tests.runtime.harnesses._test_scaffold_harnesses import _EchoHarness
 
 # ---------------------------------------------------------------------------
 # Session store
@@ -80,6 +84,27 @@ def test_store_ignores_malformed_entry(tmp_path: Path) -> None:
     path = tmp_path / "sessions.json"
     path.write_text(json.dumps({"conv-1": {"command": "c", "cwd": "/w"}}), encoding="utf-8")
     assert AcpSessionStore(path).load("conv-1") is None
+
+
+def _save_in_child(path: str, key: str) -> None:
+    AcpSessionStore(Path(path)).save(
+        key, SessionRecord(session_id=f"gw-{key}", command="c", cwd="/w")
+    )
+
+
+def test_store_keeps_entries_written_by_other_processes(tmp_path: Path) -> None:
+    path = tmp_path / "sessions.json"
+    ctx = multiprocessing.get_context("spawn")
+    children = [
+        ctx.Process(target=_save_in_child, args=(str(path), f"conv-{i}")) for i in range(6)
+    ]
+    for child in children:
+        child.start()
+    for child in children:
+        child.join(timeout=60)
+    store = AcpSessionStore(path)
+    assert [store.load(f"conv-{i}") is not None for i in range(6)] == [True] * 6
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_default_store_path_honors_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -203,6 +228,54 @@ def test_format_backfill_truncates_long_turns() -> None:
     assert len(rendered) < 2500
 
 
+def test_format_backfill_keeps_the_newest_turns() -> None:
+    turns = [ExternalTurn(role="user", text=f"turn {i}") for i in range(60)]
+    rendered = format_backfill(turns)
+    assert "_…10 earlier turn(s) not shown._" in rendered
+    assert "turn 9" not in rendered
+    assert "turn 10" in rendered
+    assert "turn 59" in rendered
+    # Omission notice precedes the turns it stands in for, which stay in order.
+    assert rendered.index("not shown") < rendered.index("turn 10") < rendered.index("turn 59")
+
+
+# ---------------------------------------------------------------------------
+# Conversation identity (telemetry-independent)
+# ---------------------------------------------------------------------------
+
+
+def test_reconciliation_needs_a_bound_conversation(tmp_path: Path) -> None:
+    ex = AcpExecutor(AcpAgentConfig(command="openclaw acp", name="OpenClaw"), cwd=str(tmp_path))
+    assert ex._reconciliation_key() is None
+    ex.bind_conversation("conv-9")
+    assert ex._reconciliation_key() == "conv-9"
+
+
+def test_adapter_binds_the_conversation_without_telemetry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The scaffold's path-derived id reaches the executor with tracing off."""
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
+    monkeypatch.setenv("OMNIGENT_TELEMETRY", "0")
+    executor = AcpExecutor(
+        AcpAgentConfig(command="openclaw acp", name="OpenClaw"), cwd=str(tmp_path)
+    )
+    adapter = ExecutorAdapter(executor_factory=lambda: executor)
+    # The scaffold records this from ``POST /v1/sessions/{id}/events``.
+    adapter._conversation_id = "conv_abc"
+    assert adapter._ensure_executor() is executor
+    assert executor._reconciliation_key() == "conv_abc"
+
+
+def test_scaffold_records_the_conversation_from_the_event_path() -> None:
+    harness = _EchoHarness()
+    app = harness.build()
+    app.state.conversation_id = "conv_x"
+    with TestClient(app) as client:
+        client.post("/v1/sessions/conv_x/events", json={"type": "interrupt"})
+    assert harness._conversation_id == "conv_x"
+
+
 # ---------------------------------------------------------------------------
 # Executor wiring (mocked transport)
 # ---------------------------------------------------------------------------
@@ -214,7 +287,7 @@ def _executor(tmp_path: Path, **kwargs: object) -> AcpExecutor:
         cwd=str(tmp_path),
     )
     ex._session_store = AcpSessionStore(tmp_path / "sessions.json")
-    ex._conversation_id = "conv-1"
+    ex.bind_conversation("conv-1")
     return ex
 
 
@@ -433,7 +506,7 @@ async def test_external_turns_are_backfilled_once_across_a_restart(tmp_path: Pat
     def new_executor() -> AcpExecutor:
         ex = AcpExecutor(AcpAgentConfig(command=command, name="OpenClaw"), cwd=str(tmp_path))
         ex._session_store = AcpSessionStore(store_path)
-        ex._conversation_id = "conv-1"
+        ex.bind_conversation("conv-1")
         return ex
 
     # 1. Start the Gateway-backed conversation from Omnigent.

@@ -825,6 +825,10 @@ class ExecutorAdapter(HarnessApp):
         """
         if self._executor is None:
             self._executor = self._executor_factory()
+        # The scaffold learns the conversation from the event path; pass it on
+        # so executors keying durable state on it work without telemetry.
+        if self._conversation_id:
+            self._executor.bind_conversation(self._conversation_id)
         return self._executor
 
     def _translate_event(self, event: ExecutorEvent, ctx: TurnContext) -> None:

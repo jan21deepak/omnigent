@@ -14,8 +14,11 @@ as `agentCapabilities.loadSession`. Omnigent uses it as follows:
 
 1. **Persist the mapping.** The Omnigent conversation id → agent session id
    mapping (plus a replay cursor) is stored in
-   `<data dir>/acp/sessions.json`, so it survives an Omnigent restart. Records
-   are scoped to the agent command and working directory.
+   `<data dir>/acp/sessions.json`, so it survives an Omnigent restart. The
+   conversation id comes from the harness event path (`Executor.bind_conversation`),
+   so it is stable regardless of telemetry. Records are scoped to the agent
+   command and working directory, and writes take a file lock so concurrent
+   conversations do not drop each other's entries.
 2. **Re-open, don't replace.** When a conversation already owns a session, the
    next turn sends `session/load` instead of `session/new`. The agent replays
    its transcript as `user_message_chunk` / `agent_message_chunk` updates.
