@@ -187,6 +187,8 @@ class MainActivity : AppCompatActivity() {
                 Gravity.TOP or Gravity.CENTER_HORIZONTAL,
             )
         switchButtonSlot = FrameLayout(this)
+        // The slot wraps the pill exactly, so let its elevation shadow spill out.
+        switchButtonSlot.clipChildren = false
         switchButtonSlot.addView(switchButton)
         switchButtonSlot.layoutParams =
             FrameLayout
