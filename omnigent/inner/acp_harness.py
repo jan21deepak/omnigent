@@ -24,6 +24,11 @@ Env vars read at startup:
   configured to accept one in ``session/new``).
 - ``HARNESS_ACP_SESSION_ID_MODE``: ``server`` (default) or ``client``.
 - ``HARNESS_ACP_SEND_MODEL``: ``"1"`` to send the model in ``session/new``.
+- ``HARNESS_ACP_RECONCILE``: ``"0"`` to disable re-opening the conversation's
+  previous agent session (``session/load``) and backfilling turns other clients
+  added while Omnigent was disconnected. On by default.
+- ``HARNESS_ACP_SESSION_STORE``: path of the conversation ↔ agent-session mapping
+  file (default ``<data dir>/acp/sessions.json``).
 - ``HARNESS_ACP_OS_ENV``: JSON-encoded :class:`OSEnvSpec`. When unset, falls
   back to ``caller_process`` + ``sandbox=none``.
 - ``HARNESS_ACP_PROMPT_TIMEOUT_S``: optional idle (time-without-progress) deadline in
@@ -50,6 +55,7 @@ _ENV_NAME = "HARNESS_ACP_NAME"
 _ENV_MODEL = "HARNESS_ACP_MODEL"
 _ENV_SESSION_ID_MODE = "HARNESS_ACP_SESSION_ID_MODE"
 _ENV_SEND_MODEL = "HARNESS_ACP_SEND_MODEL"
+_ENV_RECONCILE = "HARNESS_ACP_RECONCILE"
 _ENV_CWD = "HARNESS_ACP_CWD"
 _ENV_OS_ENV = "HARNESS_ACP_OS_ENV"
 
@@ -100,6 +106,7 @@ def _build_acp_executor() -> Executor:
     model = os.environ.get(_ENV_MODEL, "").strip() or None
     session_id_mode = os.environ.get(_ENV_SESSION_ID_MODE, "").strip() or "server"
     send_model = os.environ.get(_ENV_SEND_MODEL, "").strip() in ("1", "true", "yes")
+    reconcile = os.environ.get(_ENV_RECONCILE, "").strip() not in ("0", "false", "no")
     cwd = os.environ.get(_ENV_CWD) or os.environ.get("OMNIGENT_RUNNER_WORKSPACE") or None
 
     config = AcpAgentConfig(
@@ -108,6 +115,7 @@ def _build_acp_executor() -> Executor:
         model=model,
         session_id_mode=session_id_mode,
         send_model_in_session_new=send_model,
+        reconcile_external_turns=reconcile,
     )
     return AcpExecutor(config=config, cwd=cwd, os_env=_resolve_os_env())
 

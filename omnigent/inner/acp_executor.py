@@ -24,6 +24,11 @@ handful of things those two hardcode become config knobs here:
 Protocol flow (identical for every ACP agent):
   1. ``initialize``     — handshake; learn ``agentCapabilities`` (image support).
   2. ``session/new``    — create/adopt a session id + ``cwd`` + ``mcpServers``.
+  2b. ``session/load``   — when the conversation already owns a session id and
+     the agent advertises ``loadSession``, re-open it instead: the agent replays
+     its transcript, and turns other clients added while Omnigent was
+     disconnected are backfilled into the conversation (see
+     :mod:`omnigent.inner.acp_session_sync`).
   3. ``session/prompt`` — send a user turn; consume streaming ``session/update``
      notifications (``agent_message_chunk``, ``agent_thought_chunk``,
      ``tool_call`` / ``tool_call_update``), answer any server-initiated
@@ -59,6 +64,15 @@ from pathlib import Path
 from typing import Any, Protocol, TypeAlias
 
 from omnigent.inner._acp_omnigent_mcp import OmnigentAcpMcp
+from omnigent.inner.acp_session_sync import (
+    DIVERGENCE_NOTICE,
+    AcpSessionStore,
+    ExternalTurn,
+    HistoryReplay,
+    SessionRecord,
+    format_backfill,
+    missed_turns,
+)
 from omnigent.inner.agent_env import clean_agent_env, declared_passthrough
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.executor import (
@@ -100,6 +114,7 @@ _ACP_RESOURCE_NOT_FOUND_CODE = -32002
 # ACP protocol constants (JSON-RPC 2.0 method names).
 _AGENT_METHOD_INITIALIZE = "initialize"
 _AGENT_METHOD_SESSION_NEW = "session/new"
+_AGENT_METHOD_SESSION_LOAD = "session/load"
 _AGENT_METHOD_SESSION_PROMPT = "session/prompt"
 
 # Notification sent *from* the agent to the client (streaming progress).
@@ -161,6 +176,11 @@ class AcpAgentConfig:
     :param omnigent_mcp: Expose Omnigent's builtin tools to the agent via
         ``session/new.mcpServers`` (the shared ``serve-mcp`` relay). On by
         default; the global ``OMNIGENT_ACP_MCP=0`` kill switch also disables it.
+    :param reconcile_external_turns: Re-open the conversation's previous agent
+        session with ``session/load`` and backfill turns other clients added
+        while Omnigent was disconnected. Requires the agent to advertise
+        ``loadSession``; without it a stored mapping only yields a divergence
+        notice.
     """
 
     command: str
@@ -169,6 +189,7 @@ class AcpAgentConfig:
     session_id_mode: str = "server"
     send_model_in_session_new: bool = False
     omnigent_mcp: bool = True
+    reconcile_external_turns: bool = True
 
 
 class _AcpRequestError(Exception):
@@ -292,7 +313,19 @@ class AcpExecutor(Executor):
         self._session_id: str | None = None
         self._initialized: bool = False
         self._image_supported: bool = False
+        self._load_session_supported: bool = False
         self._system_prompt_sent: bool = False
+
+        # External-turn reconciliation state. The store maps this Omnigent
+        # conversation to the agent-side session so a reconnect (or a whole new
+        # Omnigent process) re-opens it via ``session/load`` instead of starting
+        # a divergent one; the replay buffer holds what that load returned until
+        # the next turn surfaces the delta.
+        self._session_store = AcpSessionStore()
+        self._conversation_id: str | None = None
+        self._replayed_turns: tuple[ExternalTurn, ...] = ()
+        self._replay_cursor: int = 0
+        self._divergence_pending: bool = False
 
         # ACP toolCallId → tool name, so a later tool_call_update can close the
         # right tool card with the name from the originating tool_call.
@@ -332,6 +365,7 @@ class AcpExecutor(Executor):
         # subprocess died. ``_initialized`` is a one-way latch.
         self._initialized = False
         self._image_supported = False
+        self._load_session_supported = False
         env = self._build_spawn_env()
         launch_path, argv = self._sandbox_launch(tuple(env.keys()))
         _STREAM_LIMIT = 16 * 1024 * 1024
@@ -562,17 +596,20 @@ class AcpExecutor(Executor):
             message = resp["error"].get("message", resp["error"])
             self._warn_initialize_failed(str(message))
             raise RuntimeError(f"ACP initialize failed: {message}")
-        prompt_caps = (
-            (resp.get("result") or {}).get("agentCapabilities", {}).get("promptCapabilities", {})
-        )
+        agent_caps = (resp.get("result") or {}).get("agentCapabilities", {})
+        prompt_caps = agent_caps.get("promptCapabilities", {})
         self._image_supported = bool(prompt_caps.get("image"))
+        self._load_session_supported = bool(agent_caps.get("loadSession"))
         self._initialized = True
 
     async def _ensure_session(self) -> str:
-        """Create (or reuse) an ACP session, returning the session id.
+        """Create, re-open, or reuse an ACP session, returning the session id.
 
-        In ``server`` mode we send only ``cwd`` + ``mcpServers`` and adopt the id
-        the agent returns. In ``client`` mode we generate the id and send it.
+        A conversation that already owns an agent-side session re-opens it with
+        ``session/load`` (see :meth:`_reopen_session`) so a session other clients
+        kept driving is continued rather than replaced. Otherwise ``session/new``:
+        in ``server`` mode we send only ``cwd`` + ``mcpServers`` and adopt the id
+        the agent returns; in ``client`` mode we generate the id and send it.
         ``mcpServers`` carries Omnigent's builtin tools (via the shared serve-mcp
         relay) unless disabled — see :class:`OmnigentAcpMcp`.
         """
@@ -585,6 +622,10 @@ class AcpExecutor(Executor):
             loop=asyncio.get_event_loop(),
             enabled=self._config.omnigent_mcp,
         )
+        if await self._reopen_session(mcp_servers):
+            assert self._session_id is not None
+            return self._session_id
+
         params: _AcpJsonObject = {"cwd": self._cwd, "mcpServers": mcp_servers}
         client_id: str | None = None
         if self._config.session_id_mode == "client":
@@ -606,7 +647,166 @@ class AcpExecutor(Executor):
                 "ACP session/new response missing sessionId: " + json.dumps(resp)[:200]
             )
         self._session_id = session_id
+        self._persist_session(cursor=0)
         return self._session_id
+
+    # ------------------------------------------------------------------
+    # External-turn reconciliation (session/load)
+    # ------------------------------------------------------------------
+
+    def _reconciliation_key(self) -> str | None:
+        """The Omnigent conversation id this executor is serving, if known.
+
+        The mapping must survive an Omnigent restart, so it is keyed by the
+        conversation id the request hook binds — not by the adapter's per-process
+        session key. Unknown (standalone use, unit tests) → no persistence and no
+        reconciliation.
+        """
+        if self._conversation_id:
+            return self._conversation_id
+        try:
+            from omnigent.runtime.telemetry import current_session_id
+        except ImportError:  # pragma: no cover — runtime package always present
+            return None
+        return current_session_id()
+
+    def _stored_record(self) -> tuple[str, SessionRecord] | None:
+        """Return ``(key, record)`` for a stored session usable by this agent."""
+        if not self._config.reconcile_external_turns:
+            return None
+        key = self._reconciliation_key()
+        if not key:
+            return None
+        record = self._session_store.load(key)
+        if record is None or not record.matches(command=self._config.command, cwd=self._cwd):
+            return None
+        return key, record
+
+    def _persist_session(self, *, cursor: int) -> None:
+        """Persist the conversation → session mapping with a replay cursor."""
+        if not self._config.reconcile_external_turns or self._session_id is None:
+            return
+        key = self._reconciliation_key()
+        if not key:
+            return
+        self._session_store.save(
+            key,
+            SessionRecord(
+                session_id=self._session_id,
+                command=self._config.command,
+                cwd=self._cwd,
+                cursor=cursor,
+            ),
+        )
+
+    async def _reopen_session(self, mcp_servers: list[_AcpJsonObject]) -> bool:
+        """Re-open this conversation's stored agent session via ``session/load``.
+
+        The agent replays the whole transcript as ``session/update``
+        notifications before answering, so the queued notifications are folded
+        into :attr:`_replayed_turns` for the next turn to reconcile. Returns
+        ``False`` — leaving the caller to create a fresh session — when there is
+        no stored session, the agent cannot load one, or the load fails (a
+        session the Gateway has since dropped).
+        """
+        stored = self._stored_record()
+        if stored is None:
+            return False
+        key, record = stored
+        if not self._load_session_supported:
+            logger.info(
+                "acp[%s] agent does not support session/load; starting a fresh session "
+                "(external turns cannot be reconciled)",
+                self._config.name,
+            )
+            self._divergence_pending = True
+            self._session_store.delete(key)
+            return False
+
+        params: _AcpJsonObject = {
+            "sessionId": record.session_id,
+            "cwd": self._cwd,
+            "mcpServers": mcp_servers,
+        }
+        try:
+            resp = await self._rpc(
+                _AGENT_METHOD_SESSION_LOAD, params, timeout=_INIT_TIMEOUT_SECONDS
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed load falls back to a new session
+            logger.info("acp[%s] session/load failed: %s", self._config.name, exc)
+            self._session_store.delete(key)
+            self._drain_replay()
+            return False
+        if "error" in resp:
+            logger.info(
+                "acp[%s] session/load rejected: %s",
+                self._config.name,
+                resp["error"].get("message", resp["error"]),
+            )
+            self._session_store.delete(key)
+            self._drain_replay()
+            return False
+
+        self._replayed_turns = self._drain_replay()
+        self._replay_cursor = record.cursor
+        self._session_id = record.session_id
+        # The re-opened session still holds the whole conversation, so neither
+        # the system prompt nor a history prefix is replayed into the next turn.
+        self._system_prompt_sent = True
+        return True
+
+    def _drain_replay(self) -> tuple[ExternalTurn, ...]:
+        """Fold the queued ``session/load`` replay notifications into turns."""
+        replay = HistoryReplay()
+        while not self._queue.empty():
+            try:
+                item = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if item.get("method") != _CLIENT_NOTIFICATION_SESSION_UPDATE:
+                continue
+            update = (item.get("params") or {}).get("update")
+            if isinstance(update, dict):
+                replay.add_update(update)
+        return replay.turns()
+
+    def _reconcile_external_turns(self, messages: list[Message]) -> str:
+        """Return the transcript block for turns Omnigent has not seen.
+
+        Consumes the pending replay: turns already in *messages* came from
+        Omnigent, the rest were added by another client while Omnigent was
+        disconnected. The cursor is persisted so a later reconnect does not
+        surface them again.
+        """
+        notice = DIVERGENCE_NOTICE + "\n\n" if self._divergence_pending else ""
+        self._divergence_pending = False
+        replayed = self._replayed_turns
+        if not replayed:
+            return notice
+        self._replayed_turns = ()
+        missed, cursor = missed_turns(replayed, messages, self._replay_cursor)
+        self._replay_cursor = cursor
+        self._persist_session(cursor=cursor)
+        if missed:
+            logger.info(
+                "acp[%s] backfilling %d external turn(s) from the agent session",
+                self._config.name,
+                len(missed),
+            )
+        return notice + format_backfill(missed)
+
+    def _forget_session(self) -> None:
+        """Drop the current session and its stored mapping.
+
+        Used when the agent reports the session is gone, so the next turn starts
+        a fresh one instead of re-loading an id the agent no longer knows.
+        """
+        self._session_id = None
+        self._replayed_turns = ()
+        self._replay_cursor = 0
+        key = self._reconciliation_key()
+        if key:
+            self._session_store.delete(key)
 
     # ------------------------------------------------------------------
     # Server-initiated requests (agent → client)
@@ -1039,6 +1239,10 @@ class AcpExecutor(Executor):
         # flips so we know whether to replay history into this turn.
         fresh_session = not self._system_prompt_sent
 
+        # Turns another client added to this agent session while Omnigent was
+        # disconnected are surfaced before the new turn's reply.
+        backfill = self._reconcile_external_turns(messages)
+
         user_text = ""
         image_blocks: list[_AcpJsonObject] = []
         latest_user_idx: int | None = None
@@ -1102,6 +1306,10 @@ class AcpExecutor(Executor):
         deadline = loop.time() + _PROMPT_TIMEOUT_SECONDS
         accumulated_text: list[str] = []
 
+        if backfill:
+            accumulated_text.append(backfill)
+            yield TextChunk(text=backfill)
+
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -1121,7 +1329,7 @@ class AcpExecutor(Executor):
                 if "error" in response:
                     error_msg = response["error"].get("message", "Unknown ACP error")
                     if "Session not found" in error_msg:
-                        self._session_id = None
+                        self._forget_session()
                         self._system_prompt_sent = False
                     yield ExecutorError(message=error_msg, retryable=True)
                     return
