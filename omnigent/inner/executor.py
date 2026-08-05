@@ -559,6 +559,16 @@ class Executor:
     def max_context_tokens(self) -> int | None:
         return None
 
+    def bind_conversation(self, conversation_id: str) -> None:  # noqa: ARG002 — default no-op; subclasses with durable per-conversation state override
+        """
+        Tell the executor which Omnigent conversation it is serving.
+
+        The id is stable across Omnigent restarts, unlike the per-process
+        ``session_key``, so executors that persist state for a conversation
+        (e.g. an agent-side session to re-open) key it on this.
+        """
+        return
+
     async def close_session(self, session_key: str) -> None:  # noqa: ARG002 — default no-op; subclasses with per-session state override
         """
         Release resources associated with one Omnigent session.

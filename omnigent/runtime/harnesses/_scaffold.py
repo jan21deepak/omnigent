@@ -777,6 +777,10 @@ class HarnessApp:
         # ``message`` /events handler to refuse new turns once
         # shutdown started.
         self._shutting_down = asyncio.Event()
+        # The conversation this scaffold serves, from the event path once the
+        # first event arrives. Stable across Omnigent restarts, unlike a
+        # per-process key, so subclasses can key durable state on it.
+        self._conversation_id: str | None = None
 
     async def on_shutdown(self) -> None:
         """
@@ -1106,6 +1110,7 @@ class HarnessApp:
         if denied is not None:
             return denied
         self._check_conversation_id(request, conversation_id)
+        self._conversation_id = conversation_id
         if isinstance(body, MessageEvent):
             return await self._start_or_inject_turn(body.to_create_request())
         if isinstance(body, InterruptEvent):

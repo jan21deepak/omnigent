@@ -316,11 +316,8 @@ class AcpExecutor(Executor):
         self._load_session_supported: bool = False
         self._system_prompt_sent: bool = False
 
-        # External-turn reconciliation state. The store maps this Omnigent
-        # conversation to the agent-side session so a reconnect (or a whole new
-        # Omnigent process) re-opens it via ``session/load`` instead of starting
-        # a divergent one; the replay buffer holds what that load returned until
-        # the next turn surfaces the delta.
+        # External-turn reconciliation state: the conversation → agent-session
+        # mapping a reconnect re-opens, plus the replay it has yet to surface.
         self._session_store = AcpSessionStore()
         self._conversation_id: str | None = None
         self._replayed_turns: tuple[ExternalTurn, ...] = ()
@@ -654,21 +651,19 @@ class AcpExecutor(Executor):
     # External-turn reconciliation (session/load)
     # ------------------------------------------------------------------
 
+    def bind_conversation(self, conversation_id: str) -> None:
+        """Record the conversation the mapping is keyed by (see :class:`Executor`)."""
+        self._conversation_id = conversation_id or None
+
     def _reconciliation_key(self) -> str | None:
         """The Omnigent conversation id this executor is serving, if known.
 
         The mapping must survive an Omnigent restart, so it is keyed by the
-        conversation id the request hook binds — not by the adapter's per-process
+        conversation id the harness bound — not by the adapter's per-process
         session key. Unknown (standalone use, unit tests) → no persistence and no
         reconciliation.
         """
-        if self._conversation_id:
-            return self._conversation_id
-        try:
-            from omnigent.runtime.telemetry import current_session_id
-        except ImportError:  # pragma: no cover — runtime package always present
-            return None
-        return current_session_id()
+        return self._conversation_id
 
     def _stored_record(self) -> tuple[str, SessionRecord] | None:
         """Return ``(key, record)`` for a stored session usable by this agent."""

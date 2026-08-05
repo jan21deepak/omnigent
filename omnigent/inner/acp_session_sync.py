@@ -27,15 +27,21 @@ silently continuing against a transcript that may already have diverged.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no flock.
+    fcntl = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -176,10 +182,43 @@ class AcpSessionStore:
             return {}
         return {k: v for k, v in payload.items() if isinstance(v, dict)}
 
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Serialize a read-modify-write against other Omnigent processes.
+
+        Concurrent conversations share the store, so an unlocked update would
+        drop the entry another process wrote between its read and its write.
+        """
+        if fcntl is None:
+            yield
+            return
+        fd: int | None = None
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(
+                self._path.with_name(self._path.name + ".lock"), os.O_CREAT | os.O_RDWR, 0o600
+            )
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            logger.debug("could not lock acp session store %s", self._path, exc_info=True)
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                fd = None
+        try:
+            yield
+        finally:
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+
     def _write_all(self, entries: Mapping[str, dict[str, object]]) -> None:
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_suffix(".json.tmp")
+            # Process-unique temp name: two writers must not share one.
+            tmp = self._path.with_name(f"{self._path.name}.{os.getpid()}.tmp")
             tmp.write_text(json.dumps(entries, indent=2, sort_keys=True), encoding="utf-8")
             tmp.replace(self._path)
         except OSError as exc:
@@ -192,21 +231,23 @@ class AcpSessionStore:
 
     def save(self, key: str, record: SessionRecord) -> None:
         """Store *record* under *key*, stamping ``updated_at``."""
-        entries = self._read_all()
-        entries[key] = SessionRecord(
-            session_id=record.session_id,
-            command=record.command,
-            cwd=record.cwd,
-            cursor=record.cursor,
-            updated_at=time.time(),
-        ).to_json()
-        self._write_all(entries)
+        with self._locked():
+            entries = self._read_all()
+            entries[key] = SessionRecord(
+                session_id=record.session_id,
+                command=record.command,
+                cwd=record.cwd,
+                cursor=record.cursor,
+                updated_at=time.time(),
+            ).to_json()
+            self._write_all(entries)
 
     def delete(self, key: str) -> None:
         """Drop the mapping stored under *key* (no-op when absent)."""
-        entries = self._read_all()
-        if entries.pop(key, None) is not None:
-            self._write_all(entries)
+        with self._locked():
+            entries = self._read_all()
+            if entries.pop(key, None) is not None:
+                self._write_all(entries)
 
 
 class HistoryReplay:
@@ -386,13 +427,16 @@ def format_backfill(turns: Sequence[ExternalTurn]) -> str:
     """
     if not turns:
         return ""
-    shown = list(turns[:_MAX_BACKFILL_TURNS])
+    shown = list(turns[-_MAX_BACKFILL_TURNS:])
     dropped = len(turns) - len(shown)
     count = len(turns)
     header = (
         f"_Synced {count} turn{'s' if count != 1 else ''} added to this session outside Omnigent:_"
     )
     lines = [header, ""]
+    if dropped:
+        lines.append(f"> _…{dropped} earlier turn(s) not shown._")
+        lines.append(">")
     for turn in shown:
         text = turn.text.strip()
         if len(text) > _MAX_BACKFILL_CHARS:
@@ -401,7 +445,5 @@ def format_backfill(turns: Sequence[ExternalTurn]) -> str:
         body = text.replace("\n", "\n> ")
         lines.append(f"> **{attribution}:** {body}")
         lines.append(">")
-    if dropped:
-        lines.append(f"> _…and {dropped} earlier turn(s) not shown._")
     lines.append("")
     return "\n".join(lines)
