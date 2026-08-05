@@ -1239,10 +1239,8 @@ def _preregister_agent(  # type: ignore[explicit-any]  # agent_store / artifact_
         unimportable_function_policy_paths,
     )
 
-    # A pack that lives inside a Python package declares its policies
-    # by a dotted path relative to that package's root; policy
-    # evaluation happens in this process, so the root has to be
-    # importable regardless of the cwd the server was started from.
+    # Policy evaluation runs here, so a pack's package root must be
+    # importable regardless of the server's cwd.
     ensure_pack_root_importable(agent_source)
 
     with tempfile.TemporaryDirectory() as tmpdir:
