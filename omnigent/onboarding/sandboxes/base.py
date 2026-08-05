@@ -758,6 +758,7 @@ class SandboxHostLauncher(SandboxLifecycle):
         repo_name: str | None = None,
         host_config: dict[str, object] | None = None,
         on_stage: Callable[[str], None] | None = None,
+        agent_name: str | None = None,
     ) -> str:
         """
         Start ``omnigent host`` in the sandbox and return the workspace path.
@@ -777,6 +778,12 @@ class SandboxHostLauncher(SandboxLifecycle):
             content installed into the sandbox's config BEFORE the host starts.
         :param on_stage: Progress observer invoked with ``"cloning"`` and
             ``"starting"``.
+        :param agent_name: Name of the built-in agent the session is bound to,
+            or ``None`` when it is bound to a session-scoped agent (or the
+            agent could not be resolved). Server-derived from the bound
+            agent's identity, never client-supplied, so a provider may use it
+            to classify the sandbox — e.g. the Kubernetes launcher stamps it
+            on the runner Pod. Providers without such a surface ignore it.
         :returns: The absolute in-sandbox workspace path.
         """
 
@@ -809,9 +816,13 @@ class ExecModelHostLauncher(SandboxHostLauncher, SandboxExecTransport):
         repo_name: str | None = None,
         host_config: dict[str, object] | None = None,
         on_stage: Callable[[str], None] | None = None,
+        agent_name: str | None = None,
     ) -> str:
         """
         Start ``omnigent host`` in the sandbox and return the workspace path.
+
+        *agent_name* is unused here: an exec-model sandbox has no metadata
+        surface to classify.
 
         The default is the EXEC model: probe ``$HOME``, create
         ``<HOME>/workspace``, optionally materialize the repository into it (via

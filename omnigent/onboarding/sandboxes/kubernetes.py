@@ -136,6 +136,14 @@ _MANAGED_BY_VALUE: str = "omnigent"
 _ROLE_LABEL: str = "omnigent.ai/role"
 _ROLE_VALUE: str = "sandbox-host"
 
+# Built-in agent a runner Pod runs, so cluster policy can select one agent's
+# Pods (see :func:`_pod_labels`).
+_AGENT_LABEL: str = "omnigent.ai/agent"
+
+# A Kubernetes label value: at most 63 characters, alphanumeric at each end,
+# dashes / underscores / dots in between.
+_LABEL_VALUE_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$")
+
 # Non-root identity the Pod runs as: the ``sandbox`` user/group baked into the
 # official host image (deploy/docker/Dockerfile, uid/gid 1000660000). It MUST be
 # a uid that EXISTS in the image's /etc/passwd — a uid with no passwd entry has
@@ -426,6 +434,40 @@ def _render_host_command(server_url: str) -> list[str]:
     return ["bash", "-lc", script]
 
 
+def _pod_labels(agent_name: str | None) -> dict[str, str]:
+    """
+    Build the label set stamped on a managed runner Pod.
+
+    The managed-by / role pair identifies omnigent-managed objects; the
+    :data:`_AGENT_LABEL` classifier is added only for a session bound to a
+    built-in agent whose name is expressible as a label value. It lets
+    cluster-level policy an operator owns (admission-time credential
+    injection, a ``NetworkPolicy``, a node pool) target one agent's Pods
+    instead of every managed runner, so it must not be forgeable: the
+    server passes only a name derived from the bound agent's identity, and
+    a session-scoped agent named after a built-in yields none. A name that
+    is not expressible is dropped rather than rewritten, because a mangled
+    value would silently match the wrong policy.
+
+    :param agent_name: Name of the built-in agent the session is bound to, or
+        ``None`` (session-scoped agent, or no agent resolved) for no classifier.
+    :returns: The Pod's ``metadata.labels`` mapping.
+    """
+    labels = {_MANAGED_BY_LABEL: _MANAGED_BY_VALUE, _ROLE_LABEL: _ROLE_VALUE}
+    if agent_name is None:
+        return labels
+    if not _LABEL_VALUE_RE.match(agent_name):
+        _logger.warning(
+            "Agent name %r is not a valid Kubernetes label value; "
+            "the runner Pod will carry no %s label",
+            agent_name,
+            _AGENT_LABEL,
+        )
+        return labels
+    labels[_AGENT_LABEL] = agent_name
+    return labels
+
+
 def build_token_secret_manifest(
     *, secret_name: str, namespace: str, token: str
 ) -> dict[str, object]:
@@ -477,6 +519,7 @@ def build_pod_manifest(
     resources: dict[str, object] | None = None,
     pvc_mounts: Sequence[Mapping[str, object]] | None = None,
     secret_mounts: Sequence[Mapping[str, object]] | None = None,
+    agent_name: str | None = None,
 ) -> dict[str, object]:
     """
     Build the sandbox Pod manifest as a plain dict.
@@ -549,6 +592,9 @@ def build_pod_manifest(
     :param secret_mounts: Normalized Secret mounts (``{secret_name,
         mount_path}``) added as read-only ``secret`` volumes on the host
         container only, or ``None``.
+    :param agent_name: Name of the built-in agent the session is bound to,
+        stamped as the :data:`_AGENT_LABEL` classifier, or ``None`` for no
+        classifier (see :func:`_pod_labels`).
     :returns: The Pod manifest dict.
     """
     pod_resources = _resolve_pod_resources(resources)
@@ -696,7 +742,7 @@ def build_pod_manifest(
         "metadata": {
             "name": pod_name,
             "namespace": namespace,
-            "labels": {_MANAGED_BY_LABEL: _MANAGED_BY_VALUE, _ROLE_LABEL: _ROLE_VALUE},
+            "labels": _pod_labels(agent_name),
         },
         "spec": spec,
     }
@@ -1149,6 +1195,7 @@ class KubernetesSandboxLauncher(SandboxHostLauncher):
         repo_name: str | None = None,
         host_config: dict[str, object] | None = None,
         on_stage: Callable[[str], None] | None = None,
+        agent_name: str | None = None,
     ) -> str:
         """
         Create the token Secret + runner Pod and wait for the host to start.
@@ -1176,6 +1223,9 @@ class KubernetesSandboxLauncher(SandboxHostLauncher):
             content the init container merges in before the host starts, or
             ``None``.
         :param on_stage: Progress observer; invoked with ``"starting"``.
+        :param agent_name: Name of the built-in agent the session is bound to,
+            stamped on the Pod as the :data:`_AGENT_LABEL` classifier, or
+            ``None`` for no classifier.
         :returns: The absolute in-sandbox workspace path (the cloned repository
             directory when *repo_url* is set).
         :raises click.ClickException: When creation fails or the host does not
@@ -1222,6 +1272,7 @@ class KubernetesSandboxLauncher(SandboxHostLauncher):
                     resources=self._resources,
                     pvc_mounts=self._pvc_mounts,
                     secret_mounts=self._secret_mounts,
+                    agent_name=agent_name,
                 )
                 # Secret before Pod so the Pod's secretKeyRef resolves
                 # immediately — a Pod referencing a missing Secret would sit in

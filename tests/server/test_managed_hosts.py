@@ -1688,6 +1688,46 @@ async def test_launch_without_host_config_writes_no_config(db_uri: str) -> None:
     assert not any(cmd.startswith("python3 -c") for cmd in fake.commands)
 
 
+async def test_launch_forwards_the_built_in_agent_name_to_the_launcher(
+    db_uri: str,
+) -> None:
+    """The provider learns which built-in agent the sandbox runs, so it can classify it."""
+    host_store = HostStore(db_uri)
+    seen: list[str | None] = []
+
+    def _register(invocation: HostStartInvocation) -> None:
+        host_store.upsert_on_connect(
+            host_id=invocation.host_id,
+            name=invocation.host_name,
+            user_id=_OWNER,
+        )
+
+    class _RecordingLauncher(FakeSandboxLauncher):
+        """Records the agent name each start_host call carried."""
+
+        def start_host(
+            self, sandbox_id: str, *, agent_name: str | None = None, **kwargs: object
+        ) -> str:
+            seen.append(agent_name)
+            return super().start_host(sandbox_id, **kwargs)  # type: ignore[arg-type]
+
+    fake = _RecordingLauncher(on_host_start=_register)
+
+    await launch_managed_host(
+        config=_injected_config(fake),
+        owner=_OWNER,
+        host_store=host_store,
+        agent_name="polly",
+    )
+    await launch_managed_host(
+        config=_injected_config(fake),
+        owner=_OWNER,
+        host_store=host_store,
+    )
+
+    assert seen == ["polly", None]
+
+
 async def test_launch_and_resume_without_optional_kwargs_support_legacy_start_host_signature(
     db_uri: str,
 ) -> None:
