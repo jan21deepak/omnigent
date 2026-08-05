@@ -610,6 +610,16 @@ async def test_handle_launch_spawns_subprocess(
         "runner subprocess must be spawned with stdin=subprocess.DEVNULL"
     )
 
+    # The runner must start in its session workspace, not inherit the daemon's
+    # cwd. A long-lived daemon is often launched from a directory that later
+    # disappears (temp checkout, removed worktree, deleted sandbox); once that
+    # cwd is gone, every Path.cwd() in the runner raises FileNotFoundError and
+    # native terminal creation dies before the harness launches. If this
+    # regresses, every new session on such a daemon fails to start.
+    assert spawned_kwargs.get("cwd") == str(workspace), (
+        "runner subprocess must be spawned with cwd set to the session workspace"
+    )
+
     # Clean up the spawned sleep process (and its exit watcher).
     _cleanup_host(host)
 
