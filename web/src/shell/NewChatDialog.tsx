@@ -556,6 +556,14 @@ export async function describeCreateError(res: Response): Promise<string> {
 }
 
 /**
+ * Inline-code pill inside the amber harness warning: a filled background and
+ * darker text keep the command legible (WCAG AA) against the banner's amber
+ * prose instead of blending into it.
+ */
+const WARNING_CODE_CLASS =
+  "rounded border border-amber-300 bg-amber-100 px-1 py-0.5 font-mono text-[0.95em] font-medium text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/15 dark:text-amber-100";
+
+/**
  * The pre-feature "run omni setup" guidance (ReactNode), shown under the
  * composer when the UI-driven setup feature is OFF.
  *
@@ -576,16 +584,16 @@ function harnessWarningMessage(
   if (reason === "needs-auth" && isCodex) {
     return (
       <>
-        {agentName} needs Codex authentication on {hostName} — run <code>codex login</code> on that
-        machine.
+        {agentName} needs Codex authentication on {hostName} — run{" "}
+        <code className={WARNING_CODE_CLASS}>codex login</code> on that machine.
       </>
     );
   }
   if (reason === "needs-auth" && !!harness && isNativeCursorHarness(harness)) {
     return (
       <>
-        {agentName} needs Cursor login on {hostName} — run <code>cursor-agent login</code> on that
-        machine.
+        {agentName} needs Cursor login on {hostName} — run{" "}
+        <code className={WARNING_CODE_CLASS}>cursor-agent login</code> on that machine.
       </>
     );
   }
@@ -595,14 +603,16 @@ function harnessWarningMessage(
   if (reason === "version-too-low") {
     return (
       <>
-        {agentName} has an outdated CLI on {hostName} — run <code>omni setup</code>, or upgrade the
-        CLI directly on that machine.
+        {agentName} has an outdated CLI on {hostName} — run{" "}
+        <code className={WARNING_CODE_CLASS}>omni setup</code>, or upgrade the CLI directly on that
+        machine.
       </>
     );
   }
   return (
     <>
-      {agentName} isn&apos;t configured on {hostName} — run <code>omni setup</code> on that machine.
+      {agentName} isn&apos;t configured on {hostName} — run{" "}
+      <code className={WARNING_CODE_CLASS}>omni setup</code> on that machine.
     </>
   );
 }
