@@ -4472,6 +4472,234 @@ def _seed_subagent_on_disk(
     return jsonl_path
 
 
+def _seed_nested_subagent_on_disk(
+    *,
+    parent_subagent_jsonl: Path,
+    subagent_id: str,
+    agent_type: str,
+    description: str,
+    tool_use_id: str,
+    parent_spawn_tool_use_id: str,
+) -> Path:
+    """
+    Create a nested sub-agent under ``parent_subagent_jsonl/subagents/``.
+
+    Also appends a spawn ``tool_use`` to the parent sub-agent transcript
+    so the forwarder can resolve the nested row's parent.
+
+    :param parent_subagent_jsonl: Parent sub-agent ``agent-<id>.jsonl``.
+    :param subagent_id: Nested Claude-side id.
+    :param agent_type: ``agentType`` for the meta file.
+    :param description: ``description`` for the meta file.
+    :param tool_use_id: Nested sub-agent's ``toolUseId``.
+    :param parent_spawn_tool_use_id: ``tool_use.id`` recorded in the
+        parent sub-agent transcript for the spawn call.
+    :returns: Path to the nested sub-agent's ``.jsonl``.
+    """
+    parent_record = {
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": parent_spawn_tool_use_id,
+                    "name": "Agent",
+                    "input": {"description": description},
+                }
+            ],
+        },
+    }
+    if (
+        parent_subagent_jsonl.exists()
+        and parent_subagent_jsonl.read_text(encoding="utf-8").strip()
+    ):
+        parent_subagent_jsonl.write_text(
+            parent_subagent_jsonl.read_text(encoding="utf-8").rstrip()
+            + "\n"
+            + json.dumps(parent_record)
+            + "\n",
+            encoding="utf-8",
+        )
+    else:
+        parent_subagent_jsonl.write_text(json.dumps(parent_record) + "\n", encoding="utf-8")
+
+    nested_transcript_path = (
+        parent_subagent_jsonl.parent / parent_subagent_jsonl.stem / "subagents"
+    )
+    nested_transcript_path.mkdir(parents=True, exist_ok=True)
+    meta_path = nested_transcript_path / f"agent-{subagent_id}.meta.json"
+    meta_path.write_text(
+        json.dumps(
+            {
+                "agentType": agent_type,
+                "description": description,
+                "toolUseId": tool_use_id,
+            }
+        ),
+        encoding="utf-8",
+    )
+    jsonl_path = nested_transcript_path / f"agent-{subagent_id}.jsonl"
+    jsonl_path.write_text("", encoding="utf-8")
+    return jsonl_path
+
+
+def test_spawn_tool_use_parent_map_links_nested_spawn_to_child_parent(
+    tmp_path: Path,
+) -> None:
+    """Nested sub-agents resolve their spawn tool_use to the minted child row."""
+    root_transcript = tmp_path / "session.jsonl"
+    root_transcript.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_root_spawn",
+                            "name": "Task",
+                            "input": {"description": "parent task"},
+                        }
+                    ],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    parent_jsonl = _seed_subagent_on_disk(
+        transcript_path=root_transcript,
+        subagent_id="parent_sa",
+        agent_type="Explore",
+        description="Parent sub-agent",
+        tool_use_id="toolu_root_spawn",
+    )
+    _seed_nested_subagent_on_disk(
+        parent_subagent_jsonl=parent_jsonl,
+        subagent_id="nested_sa",
+        agent_type="Explore",
+        description="Nested sub-agent",
+        tool_use_id="toolu_nested_spawn",
+        parent_spawn_tool_use_id="toolu_nested_spawn",
+    )
+    root_subagents_dir = forwarder._subagents_dir_for_transcript(root_transcript)
+    state = forwarder.SubagentForwardState(
+        subagents={
+            "parent_sa": forwarder.SubagentEntry(
+                subagent_id="parent_sa",
+                child_conversation_id="conv_parent_sa",
+                jsonl_path=str(parent_jsonl),
+            )
+        }
+    )
+    mapping = forwarder._spawn_tool_use_parent_map(
+        root_session_id="conv_root",
+        parent_transcript_path=root_transcript,
+        root_subagents_dir=root_subagents_dir,
+        state=state,
+    )
+    assert mapping["toolu_root_spawn"] == "conv_root"
+    assert mapping["toolu_nested_spawn"] == "conv_parent_sa"
+
+
+async def test_subagent_watcher_registers_nested_subagent_under_parent_child(
+    tmp_path: Path,
+) -> None:
+    """
+    A nested ``agent-<id>.meta.json`` under ``…/agent-<parent>/subagents/``
+    registers via ``external_subagent_start`` against the parent sub-agent's
+    Omnigent child session, not the top-level session.
+    """
+    bridge_dir = tmp_path / "bridge"
+    transcript_path = tmp_path / "session.jsonl"
+    transcript_path.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_root_spawn",
+                            "name": "Task",
+                            "input": {"description": "parent task"},
+                        }
+                    ],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    parent_jsonl = _seed_subagent_on_disk(
+        transcript_path=transcript_path,
+        subagent_id="parent_sa",
+        agent_type="Explore",
+        description="Parent sub-agent",
+        tool_use_id="toolu_root_spawn",
+    )
+    _seed_nested_subagent_on_disk(
+        parent_subagent_jsonl=parent_jsonl,
+        subagent_id="nested_sa",
+        agent_type="Explore",
+        description="Nested sub-agent",
+        tool_use_id="toolu_nested_spawn",
+        parent_spawn_tool_use_id="toolu_nested_spawn",
+    )
+    record_hook_event(
+        bridge_dir,
+        {
+            "hook_event_name": "SessionStart",
+            "session_id": "claude-session",
+            "transcript_path": str(transcript_path),
+        },
+    )
+
+    start_requests: list[dict[str, Any]] = []
+
+    def response_for(body: dict[str, Any]) -> dict[str, Any]:
+        if body.get("type") == "external_subagent_start":
+            subagent_id = body["data"]["subagent_id"]
+            if subagent_id == "parent_sa":
+                return {"queued": False, "child_session_id": "conv_parent_sa"}
+            if subagent_id == "nested_sa":
+                return {"queued": False, "child_session_id": "conv_nested_sa"}
+        return {}
+
+    server, _thread, base_url = _start_recording_server_with_responses(response_for)
+    task = asyncio.create_task(
+        forward_claude_transcript_to_session(
+            base_url=base_url,
+            headers={},
+            session_id="conv_root",
+            bridge_dir=bridge_dir,
+            agent_name="claude-native-ui",
+            start_at_end=False,
+            poll_interval_s=0.01,
+        )
+    )
+    try:
+        for _ in range(40):
+            if len(start_requests) >= 2:
+                break
+            req = await _get_recorded_request(server, timeout_s=1.0)
+            if req["body"].get("type") == "external_subagent_start":
+                start_requests.append(req)
+        assert len(start_requests) >= 2, "forwarder did not register both sub-agents"
+        by_subagent = {req["body"]["data"]["subagent_id"]: req for req in start_requests}
+        assert by_subagent["parent_sa"]["path"] == "/v1/sessions/conv_root/events"
+        assert by_subagent["nested_sa"]["path"] == "/v1/sessions/conv_parent_sa/events"
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        server.shutdown()
+        server.server_close()
+
+
 async def test_subagent_watcher_posts_external_subagent_start_for_new_meta(
     tmp_path: Path,
 ) -> None:
