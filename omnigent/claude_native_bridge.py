@@ -43,7 +43,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from http import HTTPStatus
@@ -62,6 +62,7 @@ if TYPE_CHECKING:
 
     from omnigent.llms.context_window import ModelPricing
 
+from omnigent.harness_agent_settings import merge_claude_settings
 from omnigent.inner.bundle_skills import claude_native_skill_args
 from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.os_env import OSEnvironment, create_os_environment
@@ -1177,6 +1178,7 @@ def build_hook_settings(
     launch_model: str | None = None,
     launch_permission_mode: str | None = None,
     launch_effort: str | None = None,
+    agent_settings: Mapping[str, object] | None = None,
 ) -> _JsonObject:
     """
     Build invocation-local Claude Code hook settings.
@@ -1205,6 +1207,9 @@ def build_hook_settings(
         for the same re-exec hardening.
     :param launch_effort: Effective launch effort from ``--effort``.
         Mirrored into ``effortLevel`` for restart/re-exec parity.
+    :param agent_settings: Optional agent-declared Claude
+        ``settings.json`` fragment from
+        ``executor.config.harness_settings``.
     :returns: JSON-serializable Claude settings fragment.
     """
     python = python_executable or sys.executable
@@ -1413,6 +1418,8 @@ def build_hook_settings(
     if chain_command is not None:
         status_parts.extend(["--chain", chain_command])
     settings["statusLine"] = {"type": "command", "command": shlex.join(status_parts)}
+    if agent_settings:
+        return merge_claude_settings(agent_settings, settings)
     return settings
 
 
@@ -1453,6 +1460,7 @@ def augment_claude_args(
     skills_filter: str | list[str] = "all",
     append_system_prompt: str | None = None,
     allowed_tools: tuple[str, ...] = (),
+    agent_settings: Mapping[str, object] | None = None,
 ) -> list[str]:
     """
     Return Claude CLI args with Omnigent MCP/hook/skill injection.
@@ -1489,6 +1497,9 @@ def augment_claude_args(
         append through Claude Code's native ``--append-system-prompt`` flag.
     :param allowed_tools: Optional narrowly scoped Claude tool names to merge
         into ``--allowedTools`` without replacing the user's allowlist.
+    :param agent_settings: Optional agent-declared Claude
+        ``settings.json`` fragment from
+        ``executor.config.harness_settings``.
     :returns: Augmented argument list for the terminal resource.
     """
     mcp_config = build_mcp_config(bridge_dir, python_executable=python_executable)
@@ -1501,6 +1512,7 @@ def augment_claude_args(
         launch_model=_arg_value(claude_args, "--model"),
         launch_permission_mode=_arg_value(claude_args, "--permission-mode"),
         launch_effort=_arg_value(claude_args, "--effort"),
+        agent_settings=agent_settings,
     )
     args = _merge_disallowed_tools(list(claude_args), _OMNIGENT_DISALLOWED_TOOLS)
     args = _merge_allowed_tools(args, allowed_tools)

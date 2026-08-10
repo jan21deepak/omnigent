@@ -1242,6 +1242,11 @@ def _build_claude_sdk_spawn_env(
     permission_mode = spec.executor.config.get("permission_mode")
     if permission_mode is not None:
         env["HARNESS_CLAUDE_SDK_PERMISSION_MODE"] = str(permission_mode)
+    harness_settings = spec.executor.config.get("harness_settings")
+    if isinstance(harness_settings, dict) and harness_settings:
+        from omnigent.harness_agent_settings import serialize_harness_settings
+
+        env["HARNESS_CLAUDE_SDK_SETTINGS_OVERLAY"] = serialize_harness_settings(harness_settings)
     return env
 
 

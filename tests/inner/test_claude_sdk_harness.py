@@ -491,3 +491,24 @@ def test_bundle_dir_unset_passes_none(
 
     assert captured["bundle_dir"] is None
     assert captured["agent_name"] is None
+
+
+def test_settings_overlay_is_resolved_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "HARNESS_CLAUDE_SDK_SETTINGS_OVERLAY",
+        '{"permissions":{"defaultMode":"acceptEdits"}}',
+    )
+    captured: dict[str, Any] = {}
+
+    def _fake_init(self: Any, **kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    with patch(
+        "omnigent.inner.claude_sdk_harness.ClaudeSDKExecutor.__init__",
+        _fake_init,
+    ):
+        claude_sdk_harness._build_claude_sdk_executor()
+
+    assert captured["settings_overlay"] == {"permissions": {"defaultMode": "acceptEdits"}}

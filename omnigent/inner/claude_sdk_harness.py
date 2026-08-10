@@ -81,6 +81,10 @@ Env vars read at startup:
   stable plugin name (so bundled skills show as
   ``<agent>:<skill>`` rather than the bundle's tmpdir
   basename).
+- ``HARNESS_CLAUDE_SDK_SETTINGS_OVERLAY``: JSON-encoded Claude
+  ``settings.json`` fragment from ``executor.config.harness_settings``.
+  Merged into the SDK ``settings`` option at turn time; Omnigent's
+  ``apiKeyHelper`` wins when both are present.
 """
 
 from __future__ import annotations
@@ -124,6 +128,7 @@ _ENV_GATEWAY_AUTH_REFRESH_INTERVAL_MS = "HARNESS_CLAUDE_SDK_GATEWAY_AUTH_REFRESH
 # executor strips ANTHROPIC_API_KEY before connecting to avoid subscription
 # auth being bypassed).
 _ENV_API_KEY_HELPER = "HARNESS_CLAUDE_SDK_API_KEY_HELPER"
+_ENV_SETTINGS_OVERLAY = "HARNESS_CLAUDE_SDK_SETTINGS_OVERLAY"
 
 # Default permission mode for the Claude SDK. ``"auto"`` auto-approves
 # tool calls with background safety checks that verify actions align
@@ -250,6 +255,35 @@ def _resolve_skills_filter() -> str | list[str]:
     return "all"
 
 
+def _resolve_settings_overlay() -> dict[str, object] | None:
+    """
+    Resolve agent-declared Claude settings from env config.
+
+    Reads :data:`_ENV_SETTINGS_OVERLAY` and decodes the JSON object
+    Omnigent serialized from ``executor.config.harness_settings``.
+    """
+    raw = os.environ.get(_ENV_SETTINGS_OVERLAY, "").strip()
+    if not raw:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        _logger.warning(
+            "%s is not valid JSON (%s); ignoring agent harness settings",
+            _ENV_SETTINGS_OVERLAY,
+            exc,
+        )
+        return None
+    if not isinstance(decoded, dict):
+        _logger.warning(
+            "%s decoded to unsupported shape %r; ignoring agent harness settings",
+            _ENV_SETTINGS_OVERLAY,
+            decoded,
+        )
+        return None
+    return decoded
+
+
 def _build_claude_sdk_executor() -> Executor:
     """
     Construct a :class:`ClaudeSDKExecutor` from env-var config.
@@ -296,6 +330,7 @@ def _build_claude_sdk_executor() -> Executor:
         agent_name=agent_name,
         skills_filter=_resolve_skills_filter(),
         api_key_helper=os.environ.get(_ENV_API_KEY_HELPER) or None,
+        settings_overlay=_resolve_settings_overlay(),
     )
 
 

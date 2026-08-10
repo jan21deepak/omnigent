@@ -247,3 +247,17 @@ def test_ucode_state_with_model_is_not_overridden_by_default(
     env = _build_claude_sdk_spawn_env(spec, workdir=None)
 
     assert env["HARNESS_CLAUDE_SDK_MODEL"] == "databricks-claude-sonnet-4-6"
+
+
+def test_harness_settings_are_serialized_for_claude_sdk() -> None:
+    spec = _make_spec()
+    spec.executor.config["harness_settings"] = {
+        "permissions": {"defaultMode": "acceptEdits"},
+        "env": {"AGENT_FLAG": "1"},
+    }
+
+    env = _build_claude_sdk_spawn_env(spec, workdir=None)
+
+    assert env["HARNESS_CLAUDE_SDK_SETTINGS_OVERLAY"] == (
+        '{"permissions":{"defaultMode":"acceptEdits"},"env":{"AGENT_FLAG":"1"}}'
+    )

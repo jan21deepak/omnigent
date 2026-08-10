@@ -1366,6 +1366,7 @@ class ClaudeSDKExecutor(Executor):
         agent_name: str | None = None,
         skills_filter: str | list[str] = "all",
         api_key_helper: str | None = None,
+        settings_overlay: dict[str, object] | None = None,
     ) -> None:
         """Create a ClaudeSDKExecutor.
 
@@ -1439,6 +1440,8 @@ class ClaudeSDKExecutor(Executor):
                 Injected into ``_extra_env`` as
                 :data:`_CLAUDE_API_KEY_HELPER_ENV_KEY` so it reaches
                 the SDK's ``settings.apiKeyHelper`` option at turn time.
+            settings_overlay: Agent-declared Claude ``settings.json``
+                fragment from ``executor.config.harness_settings``.
         """
         # Fail loud: a ``databricks-*`` model requires the gateway transport.
         if not gateway and model is not None and model.startswith("databricks-"):
@@ -1465,6 +1468,7 @@ class ClaudeSDKExecutor(Executor):
         self._bundle_dir = bundle_dir
         self._agent_name = agent_name
         self._skills_filter = skills_filter
+        self._settings_overlay = settings_overlay
         # Write the bundle's plugin manifest now (idempotent) so that
         # ``--plugin-dir <bundle>`` produces clean
         # ``<agent-name>:<skill-name>`` labels in Claude's skill
@@ -2196,10 +2200,13 @@ class ClaudeSDKExecutor(Executor):
         # ``""`` here would still leave an empty key in the child env.
         env = dict(self._extra_env)
         api_key_helper = env.pop(_CLAUDE_API_KEY_HELPER_ENV_KEY, None)
+        settings_dict: dict[str, object] = {}
+        if self._settings_overlay:
+            settings_dict.update(self._settings_overlay)
+        if api_key_helper:
+            settings_dict["apiKeyHelper"] = api_key_helper
         settings_payload = (
-            json.dumps({"apiKeyHelper": api_key_helper}, separators=(",", ":"))
-            if api_key_helper
-            else None
+            json.dumps(settings_dict, separators=(",", ":")) if settings_dict else None
         )
 
         # Capture stderr from the CLI subprocess for diagnostics
