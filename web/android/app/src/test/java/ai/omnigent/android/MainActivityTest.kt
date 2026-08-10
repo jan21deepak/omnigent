@@ -1,13 +1,16 @@
 package ai.omnigent.android
 
+import android.content.Context
 import android.content.res.Configuration
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.ValueCallback
 import android.webkit.WebView
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -116,6 +119,48 @@ class MainActivityTest {
         assertEquals(pill.left, delegate.bounds.left)
         assertEquals(pill.top, delegate.bounds.top)
         assertEquals((48 * density).toInt(), delegate.bounds.height())
+    }
+
+    @Test
+    fun `switcher layout publishes measured height to the web layer`() {
+        ServerStore(ApplicationProvider.getApplicationContext()).connect("https://example.com")
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+        val pill = activity.switchButton()
+        val recordingWebView = RecordingWebView(activity)
+        activity.replaceWebView(recordingWebView)
+
+        val density = activity.resources.displayMetrics.density
+        val pillHeight = (34 * density).toInt()
+        pill.layout(100, 40, 220, 40 + pillHeight)
+
+        assertNotNull(recordingWebView.lastScript)
+        assertTrue(
+            recordingWebView.lastScript!!.contains(
+                "--omnigent-android-switcher-height",
+            ),
+        )
+        assertTrue(recordingWebView.lastScript!!.contains("34.0px"))
+    }
+
+    private class RecordingWebView(
+        context: Context,
+    ) : WebView(context) {
+        var lastScript: String? = null
+
+        override fun evaluateJavascript(
+            script: String,
+            resultCallback: ValueCallback<String>?,
+        ) {
+            lastScript = script
+        }
+    }
+
+    private fun MainActivity.replaceWebView(webView: WebView) {
+        MainActivity::class
+            .java
+            .getDeclaredField("webView")
+            .apply { isAccessible = true }
+            .set(this, webView)
     }
 
     private fun MainActivity.switchButton(): View =

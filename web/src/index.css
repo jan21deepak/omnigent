@@ -162,7 +162,8 @@
   --omnigent-bottom-bar-visible: 0; /* web-owned 0|1 */
   /* Android floating server-switcher pill footprint (margin + height).
      Used by the Android scroll-fade gradient so it starts at the pill
-     bottom. Set once; if the pill size changes, update both values. */
+     bottom. Height defaults for older shells; the Android app sets
+     --omnigent-android-switcher-height from the measured pill after layout. */
   --omnigent-android-switcher-margin: 8px;
   --omnigent-android-switcher-height: 25px;
   --omnigent-inset-top: var(--omnigent-safe-top);
