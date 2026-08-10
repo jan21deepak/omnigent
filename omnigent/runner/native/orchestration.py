@@ -5941,6 +5941,11 @@ async def _auto_create_claude_terminal(
     # has the spec resolver) expose a bundle's ``skills/`` to Claude Code
     # via ``--plugin-dir`` — the CLI mirror of the SDK plugin wiring.
     # ``api_key_helper`` (ucode) registers Claude's gateway token command.
+    claude_agent_settings = None
+    if agent_spec is not None:
+        from omnigent.harness_agent_settings import harness_settings_from_spec
+
+        claude_agent_settings = harness_settings_from_spec(agent_spec)
     claude_args = augment_claude_args(
         base_claude_args,
         bridge_dir=bridge_dir,
@@ -5950,6 +5955,7 @@ async def _auto_create_claude_terminal(
         agent_name=agent_name,
         skills_filter=skills_filter,
         api_key_helper=claude_config.api_key_helper if claude_config is not None else None,
+        agent_settings=claude_agent_settings,
     )
 
     # Let a registered launcher plugin (e.g. Databricks' isaac) rewrite the
