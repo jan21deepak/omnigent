@@ -583,6 +583,7 @@ class MainActivity : AppCompatActivity() {
             switchButton.getHitRect(hitRect)
             if (hitRect.height() < minHeight) hitRect.bottom = hitRect.top + minHeight
             container.touchDelegate = TouchDelegate(hitRect, switchButton)
+            emitSwitcherHeight()
         }
     }
 
@@ -714,6 +715,24 @@ class MainActivity : AppCompatActivity() {
               s.setProperty('--omnigent-android-safe-area-bottom', bottom);
               s.setProperty('--omnigent-android-safe-area-left', '${bars.left / d}px');
               s.setProperty('--omnigent-android-safe-area-right', '${bars.right / d}px');
+            })();
+            """.trimIndent()
+        webView.evaluateJavascript(js, null)
+    }
+
+    /** Push the measured server-switcher pill height into the web layer. */
+    private fun emitSwitcherHeight() {
+        if (!::switchButton.isInitialized || !::webView.isInitialized) return
+        val height = switchButton.height
+        if (height <= 0) return
+        val d = resources.displayMetrics.density
+        val js =
+            """
+            (() => {
+              document.documentElement.style.setProperty(
+                '--omnigent-android-switcher-height',
+                '${height / d}px'
+              );
             })();
             """.trimIndent()
         webView.evaluateJavascript(js, null)
