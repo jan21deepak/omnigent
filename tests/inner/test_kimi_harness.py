@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -564,62 +563,6 @@ def test_run_turn_streams_text_and_emits_turn_complete(monkeypatch: pytest.Monke
     assert "--print" not in captured_argv
     assert "--output-format" in captured_argv
     assert "stream-json" in captured_argv
-
-
-def test_run_turn_reads_wire_usage_into_turn_complete(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """Headless kimi sums new ``usage.record`` rows from ``wire.jsonl`` into usage."""
-    session_id = "session_abc12345-6789"
-    wire = tmp_path / "sessions" / "wd_x" / session_id / "agents" / "main" / "wire.jsonl"
-    wire.parent.mkdir(parents=True, exist_ok=True)
-    wire.write_text(
-        json.dumps(
-            {
-                "type": "usage.record",
-                "model": "system.ai.kimi-k3",
-                "usageScope": "turn",
-                "usage": {
-                    "inputOther": 100,
-                    "output": 20,
-                    "inputCacheRead": 50,
-                    "inputCacheCreation": 0,
-                },
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    stdout_lines = [
-        json.dumps({"role": "assistant", "content": "Hi there!"}),
-        json.dumps(
-            {
-                "role": "meta",
-                "type": "session.resume_hint",
-                "session_id": session_id,
-                "command": f"kimi -r {session_id}",
-            }
-        ),
-    ]
-    fake = _FakeProcess(stdout_lines, b"", returncode=0)
-
-    async def _fake_spawn(*_args: Any, **_kwargs: Any) -> _FakeProcess:
-        return fake
-
-    monkeypatch.setattr(kimi_executor, "_create_subprocess_exec", _fake_spawn)
-    monkeypatch.setattr(kimi_executor.shutil, "which", lambda _binary: "/usr/local/bin/kimi")
-    monkeypatch.setattr("omnigent.kimi_wire_usage.resolve_user_kimi_home", lambda: tmp_path)
-
-    ex = KimiExecutor(binary_path="kimi")
-    events = asyncio.run(_collect(ex, [{"role": "user", "content": "hi"}]))
-
-    turn_completes = [e for e in events if isinstance(e, TurnComplete)]
-    assert turn_completes and turn_completes[0].usage is not None
-    usage = turn_completes[0].usage
-    assert usage["input_tokens"] == 100
-    assert usage["output_tokens"] == 20
-    assert usage["cache_read_input_tokens"] == 50
-    assert usage["model"] == "system.ai.kimi-k3"
 
 
 def test_run_turn_uses_session_resume_on_second_turn(monkeypatch: pytest.MonkeyPatch) -> None:

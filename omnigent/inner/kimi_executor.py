@@ -82,7 +82,6 @@ from omnigent.inner.executor import (
     ToolSpec,
     TurnComplete,
 )
-from omnigent.kimi_wire_usage import read_turn_usage_since_checkpoint
 
 _logger = logging.getLogger(__name__)
 
@@ -219,8 +218,6 @@ class KimiExecutor(Executor):
         self._warned_tools_without_bridge = False
         # Active subprocess handle, captured so interrupt can target it.
         self._active_process: asyncio.subprocess.Process | None = None
-        # Per-kimi-session byte offset into ``wire.jsonl`` for usage tailing.
-        self._wire_usage_offsets: dict[str, int] = {}
 
     # -- capabilities --------------------------------------------------------
 
@@ -459,9 +456,6 @@ class KimiExecutor(Executor):
         stderr_buf = bytearray()
         any_text_emitted = False
         final_text_parts: list[str] = []
-        turn_wire_offset: int | None = None
-        if self._session_id:
-            turn_wire_offset = self._wire_usage_offsets.get(self._session_id, 0)
         try:
             process = await _create_subprocess_exec(
                 *argv,
@@ -557,24 +551,8 @@ class KimiExecutor(Executor):
             )
             return
 
-        turn_usage = None
-        if self._session_id:
-            offset = (
-                turn_wire_offset
-                if turn_wire_offset is not None
-                else self._wire_usage_offsets.get(self._session_id, 0)
-            )
-            turn_usage, new_offset = await asyncio.to_thread(
-                read_turn_usage_since_checkpoint,
-                self._session_id,
-                offset,
-                fallback_model=self._model,
-            )
-            self._wire_usage_offsets[self._session_id] = new_offset
-
         yield TurnComplete(
             response="".join(final_text_parts) if any_text_emitted else None,
-            usage=turn_usage,
         )
 
     # -- session lifecycle ---------------------------------------------------
@@ -586,7 +564,6 @@ class KimiExecutor(Executor):
         resource to release. We just forget the cached session id.
         """
         self._session_id = None
-        self._wire_usage_offsets.clear()
 
     async def interrupt_session(self, session_key: str) -> bool:  # noqa: ARG002 — best-effort process terminate
         """Terminate the active kimi process, if any.

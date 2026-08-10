@@ -39,12 +39,6 @@ from pathlib import Path
 
 import httpx
 
-from omnigent.kimi_wire_usage import (
-    KimiUsageAccumulator,
-    parse_llm_request_model,
-    parse_usage_record,
-)
-
 _logger = logging.getLogger(__name__)
 
 #: Poll cadence for new wire-log lines (matches cursor_native_forwarder).
@@ -64,12 +58,6 @@ class _ForwardState:
 
     wire_path: str
     last_line: int
-    cumulative_input_tokens: int = 0
-    cumulative_output_tokens: int = 0
-    cumulative_cache_read_input_tokens: int = 0
-    latest_context_tokens: int = 0
-    latest_model: str | None = None
-    posted_model: str | None = None
 
 
 @dataclass
@@ -113,40 +101,13 @@ def _read_state(bridge_dir: Path) -> _ForwardState | None:
         return None
     wire_path = data.get("wire_path")
     last_line = data.get("last_line")
-    if not isinstance(wire_path, str) or not isinstance(last_line, int):
-        return None
-    posted_model = data.get("posted_model")
-    latest_model = data.get("latest_model")
-    return _ForwardState(
-        wire_path=wire_path,
-        last_line=last_line,
-        cumulative_input_tokens=_int_field(data, "cumulative_input_tokens"),
-        cumulative_output_tokens=_int_field(data, "cumulative_output_tokens"),
-        cumulative_cache_read_input_tokens=_int_field(data, "cumulative_cache_read_input_tokens"),
-        latest_context_tokens=_int_field(data, "latest_context_tokens"),
-        latest_model=latest_model if isinstance(latest_model, str) else None,
-        posted_model=posted_model if isinstance(posted_model, str) else None,
-    )
-
-
-def _int_field(data: dict[str, object], key: str) -> int:
-    value = data.get(key)
-    return value if isinstance(value, int) and value >= 0 else 0
+    if isinstance(wire_path, str) and isinstance(last_line, int):
+        return _ForwardState(wire_path=wire_path, last_line=last_line)
+    return None
 
 
 def _write_state(bridge_dir: Path, state: _ForwardState) -> None:
-    payload: dict[str, object] = {
-        "wire_path": state.wire_path,
-        "last_line": state.last_line,
-        "cumulative_input_tokens": state.cumulative_input_tokens,
-        "cumulative_output_tokens": state.cumulative_output_tokens,
-        "cumulative_cache_read_input_tokens": state.cumulative_cache_read_input_tokens,
-        "latest_context_tokens": state.latest_context_tokens,
-    }
-    if state.latest_model:
-        payload["latest_model"] = state.latest_model
-    if state.posted_model:
-        payload["posted_model"] = state.posted_model
+    payload = {"wire_path": state.wire_path, "last_line": state.last_line}
     tmp = bridge_dir / (_STATE_FILE + ".tmp")
     with contextlib.suppress(OSError):
         tmp.write_text(json.dumps(payload), encoding="utf-8")
@@ -390,79 +351,6 @@ async def _post_external_session_status(
     resp.raise_for_status()
 
 
-async def _post_external_session_usage(
-    client: httpx.AsyncClient,
-    *,
-    base_url: str,
-    headers: dict[str, str],
-    session_id: str,
-    data: dict[str, object],
-) -> None:
-    """POST one coalesced ``external_session_usage`` update."""
-    url = f"{base_url.rstrip('/')}/v1/sessions/{session_id}/events"
-    resp = await client.post(
-        url,
-        headers=headers,
-        json={"type": "external_session_usage", "data": data},
-    )
-    resp.raise_for_status()
-
-
-async def _post_external_model_change(
-    client: httpx.AsyncClient,
-    *,
-    base_url: str,
-    headers: dict[str, str],
-    session_id: str,
-    model: str,
-) -> None:
-    """POST one deduped ``external_model_change`` for a kimi TUI model switch."""
-    url = f"{base_url.rstrip('/')}/v1/sessions/{session_id}/events"
-    resp = await client.post(
-        url,
-        headers=headers,
-        json={"type": "external_model_change", "data": {"model": model}},
-    )
-    resp.raise_for_status()
-
-
-def _usage_accumulator_from_state(state: _ForwardState) -> KimiUsageAccumulator:
-    return KimiUsageAccumulator(
-        cumulative_input_tokens=state.cumulative_input_tokens,
-        cumulative_output_tokens=state.cumulative_output_tokens,
-        cumulative_cache_read_input_tokens=state.cumulative_cache_read_input_tokens,
-        latest_context_tokens=state.latest_context_tokens,
-        latest_model=state.latest_model,
-    )
-
-
-def _apply_usage_accumulator(state: _ForwardState, acc: KimiUsageAccumulator) -> None:
-    state.cumulative_input_tokens = acc.cumulative_input_tokens
-    state.cumulative_output_tokens = acc.cumulative_output_tokens
-    state.cumulative_cache_read_input_tokens = acc.cumulative_cache_read_input_tokens
-    state.latest_context_tokens = acc.latest_context_tokens
-    state.latest_model = acc.latest_model
-
-
-def _iter_wire_rows(wire_path: Path, last_line: int) -> list[tuple[int, dict[str, object]]]:
-    try:
-        lines = wire_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
-    rows: list[tuple[int, dict[str, object]]] = []
-    for idx in range(last_line, len(lines)):
-        line = lines[idx].strip()
-        if not line or not line.startswith("{"):
-            continue
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(row, dict):
-            rows.append((idx, row))
-    return rows
-
-
 async def _post_reasoning_item(
     client: httpx.AsyncClient,
     *,
@@ -505,13 +393,10 @@ async def forward_kimi_wire_to_session(
     """
     state = _read_state(bridge_dir)
     wire_path = Path(state.wire_path) if state is not None else None
-    if state is None:
-        state = _ForwardState(wire_path="", last_line=0)
-    last_line = state.last_line
+    last_line = state.last_line if state is not None else 0
     # Final assistant text of the turn in flight, forwarded on the ``end_turn``
     # edge so the parent's inbox gets the real result instead of an empty one.
     last_assistant_text = ""
-    last_usage_signature: tuple[tuple[str, object], ...] | None = None
     async with httpx.AsyncClient(timeout=15.0) as client:
         while True:
             if wire_path is None or not wire_path.exists():
@@ -520,94 +405,46 @@ async def forward_kimi_wire_to_session(
                 )
                 if discovered is not None and discovered != wire_path:
                     wire_path = discovered
-                    state = _ForwardState(str(wire_path), 0)
                     last_line = 0
-                    last_usage_signature = None
-                    _write_state(bridge_dir, state)
+                    _write_state(bridge_dir, _ForwardState(str(wire_path), last_line))
             if wire_path is not None and wire_path.exists():
-                rows = await asyncio.to_thread(_iter_wire_rows, wire_path, last_line)
-                usage_acc = _usage_accumulator_from_state(state)
-                usage_changed = False
-                model_to_post: str | None = None
-                for line_no, row in rows:
-                    if parse_usage_record(row) is not None:
-                        usage_acc.ingest(row)
-                        usage_changed = True
-                    llm_model = parse_llm_request_model(row)
-                    if llm_model and llm_model != state.posted_model:
-                        state.latest_model = llm_model
-                        model_to_post = llm_model
-                    item = _row_to_item(line_no, row)
-                    if item is not None:
-                        try:
-                            if item.kind == "turn_end":
-                                await _post_external_session_status(
-                                    client,
-                                    base_url=base_url,
-                                    headers=headers,
-                                    session_id=session_id,
-                                    status="idle",
-                                    output=last_assistant_text,
-                                )
-                                last_assistant_text = ""
-                            elif item.kind == "reasoning":
-                                await _post_reasoning_item(
-                                    client,
-                                    base_url=base_url,
-                                    headers=headers,
-                                    session_id=session_id,
-                                    item=item,
-                                )
-                            else:
-                                await _post_conversation_item(
-                                    client,
-                                    base_url=base_url,
-                                    headers=headers,
-                                    session_id=session_id,
-                                    item=item,
-                                    agent_name=agent_name,
-                                )
-                                if item.role == "assistant":
-                                    last_assistant_text = item.text
-                        except httpx.HTTPError as exc:
-                            _logger.warning("kimi forwarder: POST failed (will retry): %s", exc)
-                            break
-                    last_line = line_no + 1
-                    state.last_line = last_line
-                    state.wire_path = str(wire_path)
-                    _apply_usage_accumulator(state, usage_acc)
-                    _write_state(bridge_dir, state)
-                if usage_changed:
-                    payload = usage_acc.external_session_usage_payload()
-                    if payload is not None:
-                        signature = tuple(sorted(payload.items()))
-                        if signature != last_usage_signature:
-                            try:
-                                await _post_external_session_usage(
-                                    client,
-                                    base_url=base_url,
-                                    headers=headers,
-                                    session_id=session_id,
-                                    data=payload,
-                                )
-                                last_usage_signature = signature
-                            except httpx.HTTPError as exc:
-                                _logger.warning(
-                                    "kimi forwarder: usage POST failed (will retry): %s", exc
-                                )
-                if model_to_post is not None:
+                items = await asyncio.to_thread(read_kimi_wire_items, wire_path, last_line)
+                for item in items:
                     try:
-                        await _post_external_model_change(
-                            client,
-                            base_url=base_url,
-                            headers=headers,
-                            session_id=session_id,
-                            model=model_to_post,
-                        )
-                        state.posted_model = model_to_post
-                        _write_state(bridge_dir, state)
+                        if item.kind == "turn_end":
+                            await _post_external_session_status(
+                                client,
+                                base_url=base_url,
+                                headers=headers,
+                                session_id=session_id,
+                                status="idle",
+                                output=last_assistant_text,
+                            )
+                            last_assistant_text = ""
+                        elif item.kind == "reasoning":
+                            await _post_reasoning_item(
+                                client,
+                                base_url=base_url,
+                                headers=headers,
+                                session_id=session_id,
+                                item=item,
+                            )
+                        else:
+                            await _post_conversation_item(
+                                client,
+                                base_url=base_url,
+                                headers=headers,
+                                session_id=session_id,
+                                item=item,
+                                agent_name=agent_name,
+                            )
+                            if item.role == "assistant":
+                                last_assistant_text = item.text
                     except httpx.HTTPError as exc:
-                        _logger.warning("kimi forwarder: model POST failed (will retry): %s", exc)
+                        _logger.warning("kimi forwarder: POST failed (will retry): %s", exc)
+                        break
+                    last_line = item.line_no + 1
+                    _write_state(bridge_dir, _ForwardState(str(wire_path), last_line))
             await asyncio.sleep(_POLL_INTERVAL_S)
 
 
