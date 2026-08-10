@@ -1825,11 +1825,16 @@ export function NewChatLandingScreen() {
   // effectiveAgentId below (a stale id falls back to the default). A
   // project-driven visit defers to the project-prefill effect instead
   // (which falls back to the same last pick).
-  const [pickedAgentId, setPickedAgentId] = useState<string | null>(
-    () => landingDraft?.pickedAgentId ?? (projectParam !== "" ? null : readLastAgentId()),
+  // A project-scoped visit (`?project=`) seeds host / workspace / agent from
+  // the project's stored config. Ignore any module-scoped landing draft for
+  // those slots — a prior plain `/` visit may have filled them with generic
+  // defaults that would block the project prefill (fill-empty-only).
+  const projectScopedVisit = projectParam !== "";
+  const [pickedAgentId, setPickedAgentId] = useState<string | null>(() =>
+    projectScopedVisit ? null : (landingDraft?.pickedAgentId ?? readLastAgentId()),
   );
-  const [selectedHostId, setSelectedHostId] = useState<string | null>(
-    () => landingDraft?.selectedHostId ?? null,
+  const [selectedHostId, setSelectedHostId] = useState<string | null>(() =>
+    projectScopedVisit ? null : (landingDraft?.selectedHostId ?? null),
   );
   // Sessions on the selected host — fetched only when a host is selected,
   // to avoid registering hundreds of sessions into the health poll at idle.
@@ -1837,8 +1842,8 @@ export function NewChatLandingScreen() {
   // True when the user picked the sandbox option instead of a connected
   // host — the server provisions a sandbox host at create time
   // (host_type: "managed"), so no host_id or workspace is sent.
-  const [sandboxSelected, setSandboxSelected] = useState(
-    () => landingDraft?.sandboxSelected ?? false,
+  const [sandboxSelected, setSandboxSelected] = useState(() =>
+    projectScopedVisit ? false : (landingDraft?.sandboxSelected ?? false),
   );
   const { data: hostClaudeModelOptions, isLoading: hostClaudeModelsLoading } = useHostModelOptions(
     selectedHostId,
@@ -1884,8 +1889,12 @@ export function NewChatLandingScreen() {
   const [sandboxRepoBranch, setSandboxRepoBranch] = useState<string>(
     () => landingDraft?.sandboxRepoBranch ?? "",
   );
-  const [workspace, setWorkspace] = useState<string>(() => landingDraft?.workspace ?? "");
-  const [branchName, setBranchName] = useState<string>(() => landingDraft?.branchName ?? "");
+  const [workspace, setWorkspace] = useState<string>(() =>
+    projectScopedVisit ? "" : (landingDraft?.workspace ?? ""),
+  );
+  const [branchName, setBranchName] = useState<string>(() =>
+    projectScopedVisit ? "" : (landingDraft?.branchName ?? ""),
+  );
   // The base branch auto-fills from the configured default (Settings › Git)
   // when the user names a worktree branch, and is left alone once the user
   // touches it — clearing the branch name re-arms the auto-fill (see the effect
@@ -1901,8 +1910,8 @@ export function NewChatLandingScreen() {
   // at. When `branchName` still equals this, the session starts directly in
   // that worktree (no git opts). Editing the field away from it means the user
   // wants a *new* worktree off that name.
-  const [prefilledBranch, setPrefilledBranch] = useState<string>(
-    () => landingDraft?.prefilledBranch ?? "",
+  const [prefilledBranch, setPrefilledBranch] = useState<string>(() =>
+    projectScopedVisit ? "" : (landingDraft?.prefilledBranch ?? ""),
   );
   // Project to file the new session under. Empty = unfiled. Stamped as the
   // `omni_project` label at create (so the row is filed from its first sidebar
