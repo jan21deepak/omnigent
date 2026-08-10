@@ -1388,6 +1388,15 @@ function isFindBarSender(event) {
 }
 
 /**
+ * Navigate the focused window's SPA to the new-session landing (`/`),
+ * reusing the same in-place routing path as deep links and notification
+ * clicks. No-op when no window is open.
+ */
+function newSession() {
+  sendOpenPath(activeWindow(), "/");
+}
+
+/**
  * Open a new window cloning the focused window's current URL when it's a
  * loaded server page, so "New Window" lands on the same place (and the user
  * can then navigate it to a different conversation). Falls back to a plain
@@ -1706,7 +1715,7 @@ function changeServer() {
 // ---------------------------------------------------------------------------
 // Application menu — start from Electron's standard menu (which wires up the
 // platform text-editing shortcuts: Cmd/Ctrl-A/C/V/X/Z via the Edit role) and
-// insert our custom "Server" submenu (New Window, Change Server…). This is the
+// insert our custom "Server" submenu (New Session, New Window, Change Server…). This is the
 // Electron way to avoid a common bug: a hand-rolled menu that drops the Edit
 // roles kills those shortcuts inside webview text fields.
 // ---------------------------------------------------------------------------
@@ -1726,11 +1735,17 @@ function buildMenu() {
   /** @type {Electron.MenuItemConstructorOptions[]} */
   const serverSubmenu = [
     {
+      id: "new_session",
+      label: "New Session",
+      // Standard "new" shortcut — navigate to the new-session landing in the
+      // current window (same path as deep links / notification clicks).
+      accelerator: "CmdOrCtrl+N",
+      click: () => newSession(),
+    },
+    {
       id: "new_window",
       label: "New Window",
-      // Own the standard new-window accelerator here — there is no
-      // role-based File menu in this app.
-      accelerator: "CmdOrCtrl+N",
+      accelerator: "CmdOrCtrl+Shift+N",
       click: () => newWindow(),
     },
     {

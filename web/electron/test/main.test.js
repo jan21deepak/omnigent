@@ -327,3 +327,39 @@ describe("deep-link ingestion wiring (src/main.js)", () => {
     );
   });
 });
+
+describe("new-session shortcut wiring (src/main.js)", () => {
+  it("binds CmdOrCtrl+N to in-window new-session navigation, not newWindow", () => {
+    assert.match(
+      liveCode,
+      /id:\s*"new_session"[\s\S]{0,200}accelerator:\s*"CmdOrCtrl\+N"[\s\S]{0,120}newSession\(\)/,
+      [
+        "Cmd/Ctrl+N must navigate to the new-session landing in the current window",
+        "(newSession → sendOpenPath(..., '/')), not open a new OS window.",
+      ].join(" "),
+    );
+    assert.match(
+      liveCode,
+      /function newSession\(\)\s*\{[\s\S]{0,120}sendOpenPath\(activeWindow\(\),\s*"\/"\)/,
+      [
+        "newSession() must route through sendOpenPath(activeWindow(), '/') so the SPA",
+        "navigates in-place via omnigent:open-path.",
+      ].join(" "),
+    );
+    assert.match(
+      liveCode,
+      /id:\s*"new_window"[\s\S]{0,200}accelerator:\s*"CmdOrCtrl\+Shift\+N"/,
+      [
+        "New Window must keep a distinct accelerator (Cmd/Ctrl+Shift+N) so it does not",
+        "steal the standard new-session shortcut.",
+      ].join(" "),
+    );
+    assert.doesNotMatch(
+      liveCode,
+      /id:\s*"new_window"[\s\S]{0,200}accelerator:\s*"CmdOrCtrl\+N"/,
+      [
+        "New Window must not own Cmd/Ctrl+N — that shortcut belongs to New Session.",
+      ].join(" "),
+    );
+  });
+});
