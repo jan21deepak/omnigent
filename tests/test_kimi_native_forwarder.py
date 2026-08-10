@@ -11,15 +11,21 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
+import pytest
+
 from omnigent.kimi_native_forwarder import (
     _discover_wire,
     _ForwardState,
+    _post_external_model_change,
+    _post_external_session_usage,
     _read_state,
     _row_to_item,
     _write_state,
     clear_kimi_bridge_state,
     read_kimi_wire_items,
 )
+from omnigent.kimi_wire_usage import KimiUsageAccumulator
 
 
 class TestRowToItem:
@@ -205,3 +211,102 @@ class TestDiscoverWire:
         self._make_session(home, "session_stale", "/ws", mtime=1000.0)
         # launch far in the future (ms) → the 1000s-mtime session is below the floor.
         assert _discover_wire(home, "/ws", launch_epoch_ms=9_000_000_000_000) is None
+
+
+class _RecordingClient:
+    def __init__(self) -> None:
+        self.posts: list[tuple[str, dict]] = []
+
+    async def post(self, url: str, *, json: dict, headers: dict | None = None) -> httpx.Response:
+        del headers
+        self.posts.append((url, json))
+        return httpx.Response(200, request=httpx.Request("POST", url))
+
+
+@pytest.mark.asyncio
+async def test_post_external_session_usage_shape() -> None:
+    client = _RecordingClient()
+    await _post_external_session_usage(
+        client,  # type: ignore[arg-type]
+        base_url="http://localhost:6767",
+        headers={},
+        session_id="conv_x",
+        data={
+            "cumulative_input_tokens": 100,
+            "cumulative_output_tokens": 20,
+            "model": "system.ai.kimi-k3",
+        },
+    )
+    assert client.posts == [
+        (
+            "http://localhost:6767/v1/sessions/conv_x/events",
+            {
+                "type": "external_session_usage",
+                "data": {
+                    "cumulative_input_tokens": 100,
+                    "cumulative_output_tokens": 20,
+                    "model": "system.ai.kimi-k3",
+                },
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_post_external_model_change_dedupes_via_state(tmp_path: Path) -> None:
+    client = _RecordingClient()
+    await _post_external_model_change(
+        client,  # type: ignore[arg-type]
+        base_url="http://localhost:6767",
+        headers={},
+        session_id="conv_x",
+        model="system.ai.kimi-k3",
+    )
+    state = _ForwardState(
+        wire_path="/x/wire.jsonl",
+        last_line=0,
+        posted_model=None,
+    )
+    state.posted_model = "system.ai.kimi-k3"
+    _write_state(tmp_path, state)
+    loaded = _read_state(tmp_path)
+    assert loaded is not None
+    assert loaded.posted_model == "system.ai.kimi-k3"
+
+
+def test_forward_state_round_trips_usage_fields(tmp_path: Path) -> None:
+    state = _ForwardState(
+        wire_path="/x/wire.jsonl",
+        last_line=3,
+        cumulative_input_tokens=100,
+        cumulative_output_tokens=20,
+        cumulative_cache_read_input_tokens=50,
+        latest_context_tokens=150,
+        latest_model="system.ai.kimi-k3",
+        posted_model="system.ai.kimi-k3",
+    )
+    _write_state(tmp_path, state)
+    loaded = _read_state(tmp_path)
+    assert loaded == state
+
+
+def test_usage_accumulator_builds_external_payload() -> None:
+    acc = KimiUsageAccumulator()
+    acc.ingest(
+        {
+            "type": "usage.record",
+            "usageScope": "turn",
+            "model": "system.ai.kimi-k3",
+            "usage": {
+                "inputOther": 10,
+                "output": 5,
+                "inputCacheRead": 2,
+                "inputCacheCreation": 1,
+            },
+        }
+    )
+    payload = acc.external_session_usage_payload()
+    assert payload is not None
+    assert payload["cumulative_input_tokens"] == 11
+    assert payload["cumulative_output_tokens"] == 5
+    assert payload["cumulative_cache_read_input_tokens"] == 2
