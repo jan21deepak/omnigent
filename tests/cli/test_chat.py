@@ -3100,6 +3100,80 @@ def test_await_accounts_setup_times_out(
         chat_module._await_accounts_first_run_setup("http://127.0.0.1:8000", timeout_s=0.0)
 
 
+def test_await_accounts_setup_prompts_login_when_admin_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When setup is done but the CLI token is missing, sign in instead of 401."""
+    login_calls: list[str] = []
+
+    monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url: None)
+    monkeypatch.setattr(
+        "omnigent.chat.httpx.get",
+        lambda _url, timeout=5.0: _info_response({"accounts_enabled": True, "needs_setup": False}),
+    )
+    monkeypatch.setattr("omnigent.chat.sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr(
+        "omnigent.cli._accounts_login",
+        lambda server: login_calls.append(server),
+    )
+
+    chat_module._await_accounts_first_run_setup("http://127.0.0.1:8000")
+
+    assert login_calls == ["http://127.0.0.1:8000"]
+
+
+def test_await_accounts_setup_missing_token_non_tty_fails_loud(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Headless invocations get the login command instead of an auth traceback."""
+    monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url: None)
+    monkeypatch.setattr(
+        "omnigent.chat.httpx.get",
+        lambda _url, timeout=5.0: _info_response({"accounts_enabled": True, "needs_setup": False}),
+    )
+    monkeypatch.setattr("omnigent.chat.sys.stdin.isatty", lambda: False)
+
+    with pytest.raises(click.ClickException, match=r"omnigent login http://127\.0\.0\.1:8000"):
+        chat_module._await_accounts_first_run_setup("http://127.0.0.1:8000")
+
+
+def test_prepare_chat_session_via_daemon_auth_required_raises_click_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 401 from session create becomes a ClickException, not a crash."""
+    from omnigent_client import OmnigentError as ClientOmnigentError
+
+    class _FakeSessions:
+        async def create(self, *_args: object, **_kwargs: object) -> object:
+            raise ClientOmnigentError("Authentication required", 401, "unauthorized")
+
+    class _FakeSdk:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.sessions = _FakeSessions()
+
+        async def __aenter__(self) -> _FakeSdk:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    monkeypatch.setattr("omnigent_client.OmnigentClient", _FakeSdk)
+
+    with pytest.raises(click.ClickException, match="omnigent login"):
+        asyncio.run(
+            _prepare_chat_session_via_daemon(
+                base_url="http://127.0.0.1:8000",
+                headers={},
+                auth=None,
+                host_id="host_x",
+                bundle=b"bundle-bytes",
+                resume_conversation_id=None,
+                fork_session_id=None,
+                workspace="/tmp/proj",
+            )
+        )
+
+
 def test_run_attach_errors_loud_when_host_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     """``run_attach`` fails loud — and never connects — when the session has no
     online runner (the host is offline). ``attach`` must never start one."""
