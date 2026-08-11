@@ -1,13 +1,14 @@
 """Unit tests for native-worker YOLO ``terminal_launch_args`` derivation.
 
 Nessie's native sub-agent workers (claude-native / codex-native /
-cursor-native) launch in a headless pane where no human can answer an
-approval prompt. The server translates a worker's bypass stance into the
-per-session ``terminal_launch_args`` the runner appends to the native
-CLI argv: claude-native opts in via ``permission_mode``, while
-codex-native and cursor-native default to full bypass (issue #171 /
-cursor ``--yolo``) because the headless seam has no safe non-bypass
-default, with ``yolo: false`` as the opt-out.
+cursor-native / antigravity-native) launch in a headless pane where no human
+can answer an approval prompt. The server translates a worker's bypass stance
+into the per-session ``terminal_launch_args`` the runner appends to the native
+CLI argv: claude-native opts in via ``permission_mode``, while codex-native,
+cursor-native, and antigravity-native default to full bypass (issue #171 /
+cursor ``--yolo`` / agy ``--dangerously-skip-permissions``) because the
+headless seam has no safe non-bypass default, with ``yolo: false`` as the
+opt-out.
 
 These tests exercise the pure translation helper
 ``_derive_terminal_launch_args_from_spec`` directly with real
@@ -175,6 +176,31 @@ def test_cursor_native_permission_mode_auto_uses_auto_review() -> None:
     """
     spec = _spec_with_config({"harness": "cursor-native", "permission_mode": "auto"})
     assert _derive_terminal_launch_args_from_spec(spec) == ["--auto-review"]
+
+
+def test_antigravity_native_defaults_to_skip_permissions_flag() -> None:
+    """
+    A headless antigravity-native sub-agent defaults to permission bypass.
+
+    Polly's agy worker launches in a pane where no human answers agy's native
+    ``request-review`` permission prompt. Without
+    ``--dangerously-skip-permissions`` the worker stalls on the first gated
+    tool call.
+    """
+    agy = _spec_with_config({"harness": "antigravity-native"})
+    assert _derive_terminal_launch_args_from_spec(agy) == ["--dangerously-skip-permissions"]
+
+
+def test_antigravity_native_yolo_true_translates_to_skip_permissions_flag() -> None:
+    """antigravity-native + ``yolo: true`` (string ``"True"``) -> skip flag."""
+    spec = _spec_with_config({"harness": "antigravity-native", "yolo": "True"})
+    assert _derive_terminal_launch_args_from_spec(spec) == ["--dangerously-skip-permissions"]
+
+
+def test_antigravity_native_yolo_false_opts_out() -> None:
+    """``yolo: false`` keeps antigravity-native prompting (no launch args)."""
+    spec = _spec_with_config({"harness": "antigravity-native", "yolo": "False"})
+    assert _derive_terminal_launch_args_from_spec(spec) is None
 
 
 @pytest.mark.parametrize(
