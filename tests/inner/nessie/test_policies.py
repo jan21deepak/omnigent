@@ -439,6 +439,10 @@ def test_worktree_guard_blocks_escapes(path: str, expected: str) -> None:
         ("MultiEdit", "file_path", "src/app.py", "ALLOW"),
         ("MultiEdit", "file_path", "/etc/passwd", "DENY"),
         ("MultiEdit", "file_path", "../escape.py", "DENY"),
+        # Claude native NotebookEdit uses ``notebook_path``.
+        ("NotebookEdit", "notebook_path", "notebooks/run.ipynb", "ALLOW"),
+        ("NotebookEdit", "notebook_path", "/etc/x.ipynb", "DENY"),
+        ("NotebookEdit", "notebook_path", "../escape.ipynb", "DENY"),
         # Pi native write/edit (lowercase) use ``path`` (Omnigent convention).
         ("write", "path", "src/app.py", "ALLOW"),
         ("write", "path", "/etc/passwd", "DENY"),
@@ -453,6 +457,9 @@ def test_worktree_guard_blocks_escapes(path: str, expected: str) -> None:
         "MultiEdit-in-tree",
         "MultiEdit-absolute",
         "MultiEdit-escape",
+        "NotebookEdit-in-tree",
+        "NotebookEdit-absolute",
+        "NotebookEdit-escape",
         "pi-write-in-tree",
         "pi-write-absolute",
         "pi-edit-escape",
@@ -502,6 +509,7 @@ def test_worktree_guard_only_guards_writes() -> None:
         ("Write", {"file_path": "a.py", "content": "x"}),
         ("Edit", {"file_path": "a.py", "old_string": "x", "new_string": "y"}),
         ("MultiEdit", {"file_path": "a.py", "edits": []}),
+        ("NotebookEdit", {"notebook_path": "a.ipynb", "cell_id": "c1", "new_source": "x"}),
         # Pi native lowercase.
         ("write", {"path": "a.py", "content": "x"}),
         ("edit", {"path": "a.py"}),
