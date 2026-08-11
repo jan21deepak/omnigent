@@ -604,6 +604,25 @@ async def _create_session(deps: FireDeps, task: ScheduledTask) -> Conversation:
         )
         if updated is not None:
             conv = updated
+    # Mirror ``POST /v1/sessions`` create: native wrapper agents stamp
+    # terminal-first presentation labels at creation so the web UI's
+    # Chat/Terminal pill is available immediately (including before the
+    # runner connects). SDK sessions still rely on the runner to stamp
+    # ``omnigent.ui: terminal`` when it auto-creates the REPL terminal.
+    agent = await asyncio.to_thread(deps.agent_store.get, task.agent_id)
+    if agent is not None:
+        from omnigent.native_coding_agents import native_coding_agent_for_agent_name
+
+        native_agent = native_coding_agent_for_agent_name(agent.name)
+        if native_agent is not None:
+            await asyncio.to_thread(
+                deps.conversation_store.set_labels,
+                conv.id,
+                native_agent.presentation_labels,
+            )
+            refreshed = await asyncio.to_thread(deps.conversation_store.get_conversation, conv.id)
+            if refreshed is not None:
+                conv = refreshed
     return conv
 
 

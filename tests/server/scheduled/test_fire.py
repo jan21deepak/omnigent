@@ -45,6 +45,7 @@ class _FakeConversation:
 @dataclass
 class _FakeAgent:
     id: str
+    name: str = "hello_world"
     bundle_location: str | None = None
     session_id: str | None = None
 
@@ -110,6 +111,7 @@ class SequencedScheduledTaskStore(FakeScheduledTaskStore):
 class FakeConversationStore:
     def __init__(self, *, fail_create: bool = False) -> None:
         self.created: list[dict[str, Any]] = []
+        self.labels: list[tuple[str, dict[str, str]]] = []
         self.create_workspace_ids: list[int] = []
         self._seq = 0
         self.fail_create = fail_create
@@ -128,6 +130,9 @@ class FakeConversationStore:
         )
         self.created.append(kwargs)
         return conv
+
+    def set_labels(self, conversation_id: str, labels: dict[str, str]) -> None:
+        self.labels.append((conversation_id, labels))
 
     def update_conversation(self, conversation_id: str, **kwargs: Any) -> _FakeConversation:
         return _FakeConversation(id=conversation_id, agent_id="")
@@ -334,6 +339,45 @@ async def test_active_creates_session_grant_and_run() -> None:
     assert len(store.runs) == 1
     assert any("last_run_at" in u for u in store.updates)
     assert any("last_run_conversation_id" in u for u in store.updates)
+
+
+@pytest.mark.asyncio
+async def test_active_native_agent_stamps_terminal_first_labels() -> None:
+    from omnigent._wrapper_labels import (
+        CLAUDE_NATIVE_WRAPPER_VALUE,
+        UI_MODE_LABEL_KEY,
+        UI_MODE_TERMINAL_VALUE,
+        WRAPPER_LABEL_KEY,
+    )
+    from omnigent.native_coding_agents import CLAUDE_NATIVE_AGENT_NAME
+
+    conv_store = FakeConversationStore()
+    store = FakeScheduledTaskStore(rows={"task_1": _task()})
+    agent_store = FakeAgentStore(
+        {
+            "ag_1": _FakeAgent("ag_1", name=CLAUDE_NATIVE_AGENT_NAME),
+        }
+    )
+
+    async def _launch(conv: Any, task: Any) -> None:
+        return None
+
+    on_fire = build_on_fire(
+        _deps(store, conversation_store=conv_store, agent_store=agent_store),
+        launch_dispatch=_launch,
+    )
+    await on_fire(0, "task_1")
+    await _drain()
+
+    assert conv_store.labels == [
+        (
+            "conv_1",
+            {
+                UI_MODE_LABEL_KEY: UI_MODE_TERMINAL_VALUE,
+                WRAPPER_LABEL_KEY: CLAUDE_NATIVE_WRAPPER_VALUE,
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio
