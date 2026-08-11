@@ -3036,6 +3036,21 @@ def test_await_accounts_setup_noop_when_token_present(
     chat_module._await_accounts_first_run_setup("http://127.0.0.1:8000")
 
 
+def test_await_accounts_setup_noop_when_env_bearer_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``OMNIGENT_REMOTE_AUTH_TOKEN`` authenticates without a stored JWT."""
+    monkeypatch.setenv(chat_module._REMOTE_AUTH_TOKEN_ENV, "env-token")
+    monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url: None)
+
+    def _must_not_probe(*_a: object, **_k: object) -> object:
+        raise AssertionError("must not call /v1/info when env bearer is set")
+
+    monkeypatch.setattr("omnigent.chat.httpx.get", _must_not_probe)
+
+    chat_module._await_accounts_first_run_setup("http://127.0.0.1:8000")
+
+
 def test_await_accounts_setup_noop_for_header_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3106,6 +3121,7 @@ def test_await_accounts_setup_prompts_login_when_admin_exists(
     """When setup is done but the CLI token is missing, sign in instead of 401."""
     login_calls: list[str] = []
 
+    monkeypatch.delenv(chat_module._REMOTE_AUTH_TOKEN_ENV, raising=False)
     monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url: None)
     monkeypatch.setattr(
         "omnigent.chat.httpx.get",
@@ -3126,6 +3142,7 @@ def test_await_accounts_setup_missing_token_non_tty_fails_loud(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Headless invocations get the login command instead of an auth traceback."""
+    monkeypatch.delenv(chat_module._REMOTE_AUTH_TOKEN_ENV, raising=False)
     monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url: None)
     monkeypatch.setattr(
         "omnigent.chat.httpx.get",

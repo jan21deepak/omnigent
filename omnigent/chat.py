@@ -1398,8 +1398,9 @@ def _await_accounts_first_run_setup(
     failed, ``auth_tokens.json`` was cleared, or the token expired), prompt for
     ``omnigent login`` on a TTY instead of 401-ing on the first session call.
 
-    No-op when the server is not in accounts mode, or when this CLI already
-    holds a token for *base_url*.
+    No-op when the server is not in accounts mode, when
+    ``OMNIGENT_REMOTE_AUTH_TOKEN`` is set, or when this CLI already holds a
+    token for *base_url*.
 
     :param base_url: Resolved local Omnigent server URL, e.g.
         ``"http://127.0.0.1:6767"``.
@@ -1412,8 +1413,10 @@ def _await_accounts_first_run_setup(
     """
     from omnigent import cli_auth
 
-    # Already authenticated to this server — nothing to wait for.
-    if cli_auth.load_token(base_url) is not None:
+    # Already authenticated — env bearer (same precedence as `_remote_headers`)
+    # or a stored JWT. Later headers/auth will attach it.
+    env_token = (os.environ.get(_REMOTE_AUTH_TOKEN_ENV) or "").strip()
+    if env_token or cli_auth.load_token(base_url) is not None:
         return
     try:
         info = httpx.get(f"{base_url}/v1/info", timeout=5.0).json()
