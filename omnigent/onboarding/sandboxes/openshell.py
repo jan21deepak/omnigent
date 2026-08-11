@@ -423,7 +423,7 @@ class OpenShellSandboxLauncher(SandboxLauncher):
         the command runs in the foreground of an ``exec_stream`` drained on
         a daemon thread — the stream stays open for the process's lifetime.
         """
-        bg_command = f"{command} > {log_path} 2>&1 < /dev/null"
+        bg_command = f"{command} >> {log_path} 2>&1 < /dev/null"
         self._openshell().exec_background(
             sandbox_id, ["bash", "-lc", bg_command], timeout=_FOREGROUND_TIMEOUT_S
         )
