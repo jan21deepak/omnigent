@@ -11,7 +11,7 @@ import pytest
 from click import ClickException
 from click.testing import CliRunner
 
-from omnigent.cli import _HostDaemonRecord, _SessionPagesResult, cli
+from omnigent.cli import _HostDaemonRecord, _SessionPagesResult, _terminate_daemon, cli
 from omnigent.host.local_server import LocalServerInfo, LocalServerStartup
 
 
@@ -380,3 +380,26 @@ def test_server_stop_finds_untracked_orphan_when_pidfile_lost(
 
     assert result.exit_code == 0, result.output
     assert "Stopped the background server." in result.output
+
+
+def test_terminate_daemon_survives_permission_error_on_kill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_terminate_daemon`` must not crash when ``os.kill`` raises PermissionError.
+
+    On macOS the recorded daemon PID can be alive but not signalable (another
+    user's process, or a stale pid that was recycled). ``omnigent upgrade`` calls
+    this during server drain and must continue rather than abort.
+    """
+    record = _record(pid=42_424)
+    monkeypatch.setattr("omnigent.cli._HOST_DAEMON_STOP_GRACE_S", 0.0)
+
+    def _kill(_pid: int, _sig: int) -> None:
+        raise PermissionError("[Errno 1] Operation not permitted")
+
+    monkeypatch.setattr("omnigent.cli.os.kill", _kill)
+    monkeypatch.setattr("omnigent.cli._pid_alive", lambda _pid: True)
+    monkeypatch.setattr("omnigent.cli.time.sleep", lambda _s: None)
+
+    with pytest.raises(ClickException, match="did not exit"):
+        _terminate_daemon(record, force=False)
