@@ -21,6 +21,8 @@ def claude_native_write_path(args: dict[str, Any]) -> str:
     """
     for key in _CLAUDE_NATIVE_PATH_KEYS:
         value = args.get(key)
-        if isinstance(value, str):
+        # Skip empty strings so a blank ``path`` falls through to
+        # ``file_path`` / ``notebook_path`` (same as ``or``-chain fallback).
+        if isinstance(value, str) and value:
             return value
     return ""
