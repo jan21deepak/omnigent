@@ -1332,13 +1332,58 @@ _ACCOUNTS_SETUP_POLL_INTERVAL_S = 1.0
 _ACCOUNTS_SETUP_TIMEOUT_S = 600.0
 
 
+def _accounts_login_or_fail(base_url: str) -> None:
+    """Sign in to an accounts-mode server or fail with the login hint.
+
+    Used when the server already has an admin (``needs_setup`` is false)
+    but this CLI holds no session JWT — e.g. bootstrap token mint failed,
+    ``auth_tokens.json`` was cleared, or the stored token expired.
+
+    :param base_url: Resolved Omnigent server URL, e.g.
+        ``"http://127.0.0.1:6767"``.
+    :raises click.ClickException: When login is required but stdin is
+        not a TTY (headless / piped invocations).
+    """
+    normalized = base_url.rstrip("/")
+    login_cmd = f"omnigent login {normalized}"
+    if not sys.stdin.isatty():
+        raise click.ClickException(
+            f"Not signed in to {normalized} (accounts auth). Run `{login_cmd}` and retry."
+        )
+    from omnigent.cli import _accounts_login
+
+    click.echo(
+        f"\n  Not signed in to {normalized} (accounts auth).\n"
+        f"  Sign in below, or run `{login_cmd}` separately.\n"
+    )
+    _accounts_login(normalized)
+
+
+def _auth_required_click_exception(
+    base_url: str, detail: str | None = None
+) -> click.ClickException:
+    """Build a ClickException for a rejected authenticated API call.
+
+    :param base_url: The server URL the user was talking to.
+    :param detail: Optional server error text to append.
+    :returns: A ``click.ClickException`` naming ``omnigent login``.
+    """
+    normalized = base_url.rstrip("/")
+    login_cmd = f"omnigent login {normalized}"
+    message = f"Not signed in to {normalized}."
+    if detail:
+        message = f"{message} {detail}"
+    message = f"{message} Run `{login_cmd}` and retry."
+    return click.ClickException(message)
+
+
 def _await_accounts_first_run_setup(
     base_url: str,
     *,
     timeout_s: float = _ACCOUNTS_SETUP_TIMEOUT_S,
     progress: RunnerStartupProgress | None = None,
 ) -> None:
-    """Block until a fresh accounts-mode local server has its first admin.
+    """Block until accounts-mode local auth is ready for authenticated calls.
 
     When ``omnigent run`` (re)spawns the local Omnigent server in accounts mode on
     a machine with no admin yet, the server reports ``needs_setup`` and (by
@@ -1349,9 +1394,12 @@ def _await_accounts_first_run_setup(
     poll until the admin is created; ``/auth/setup`` then mints this CLI's
     loopback token, which we detect and return on.
 
-    No-op when the server is not in accounts mode, when this CLI already holds
-    a token for *base_url*, or when an admin already exists (the server mints
-    our token at boot in that case).
+    When an admin already exists but this CLI holds no session JWT (token mint
+    failed, ``auth_tokens.json`` was cleared, or the token expired), prompt for
+    ``omnigent login`` on a TTY instead of 401-ing on the first session call.
+
+    No-op when the server is not in accounts mode, or when this CLI already
+    holds a token for *base_url*.
 
     :param base_url: Resolved local Omnigent server URL, e.g.
         ``"http://127.0.0.1:6767"``.
@@ -1359,7 +1407,8 @@ def _await_accounts_first_run_setup(
     :param progress: Active startup spinner, if any. Cleared before the
         interactive setup prompt below so the spinner doesn't animate over
         it. ``None`` (the default) when no spinner is running.
-    :raises click.ClickException: If setup does not complete in time.
+    :raises click.ClickException: If setup does not complete in time, or
+        login is required on a non-interactive stdin.
     """
     from omnigent import cli_auth
 
@@ -1372,9 +1421,16 @@ def _await_accounts_first_run_setup(
         # /v1/info unreachable / unparseable: don't block — let the normal
         # path run and surface any real error.
         return
-    if not (isinstance(info, dict) and info.get("accounts_enabled") and info.get("needs_setup")):
-        # Header / OIDC, or an admin already exists (token minted at boot):
-        # the normal headers/auth path handles it.
+    if not (isinstance(info, dict) and info.get("accounts_enabled")):
+        # Header / OIDC: the normal headers/auth path handles it.
+        return
+
+    if not info.get("needs_setup"):
+        # Admin exists but we have no credential — sign in instead of 401-ing
+        # on the first authenticated call below.
+        if progress is not None:
+            progress.finish()
+        _accounts_login_or_fail(base_url)
         return
 
     # We're about to print an interactive prompt and poll — drop the startup
@@ -1455,16 +1511,21 @@ async def _prepare_chat_session_via_daemon(
     from omnigent.native_terminal import bind_session_runner
 
     async with OmnigentClient(base_url=base_url, headers=headers, auth=auth) as sdk:
-        if fork_session_id is not None:
-            fork_result = await sdk.sessions.fork(fork_session_id)
-            session_id = fork_result["id"]
-        elif resume_conversation_id is not None:
-            session_id = resume_conversation_id
-        else:
-            created = await sdk.sessions.create(
-                bundle, filename="agent.tar.gz", workspace=workspace
-            )
-            session_id = created.id
+        try:
+            if fork_session_id is not None:
+                fork_result = await sdk.sessions.fork(fork_session_id)
+                session_id = fork_result["id"]
+            elif resume_conversation_id is not None:
+                session_id = resume_conversation_id
+            else:
+                created = await sdk.sessions.create(
+                    bundle, filename="agent.tar.gz", workspace=workspace
+                )
+                session_id = created.id
+        except ClientOmnigentError as exc:
+            if exc.status_code in {401, 403}:
+                raise _auth_required_click_exception(base_url, str(exc)) from exc
+            raise
 
     # A separate raw httpx client for the host-runner protocol (the daemon
     # launch helpers operate on httpx, not the SDK).
