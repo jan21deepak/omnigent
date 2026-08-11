@@ -8118,7 +8118,7 @@ def _terminate_daemon(record: _HostDaemonRecord, *, force: bool) -> None:
     if not _pid_alive(record.pid):
         _delete_daemon_record(record)
         return
-    with contextlib.suppress(ProcessLookupError):
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
         os.kill(record.pid, signal.SIGTERM)
     deadline = time.monotonic() + _HOST_DAEMON_STOP_GRACE_S
     while time.monotonic() < deadline:
@@ -8127,7 +8127,7 @@ def _terminate_daemon(record: _HostDaemonRecord, *, force: bool) -> None:
             return
         time.sleep(0.1)
     if force:
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.kill(record.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:

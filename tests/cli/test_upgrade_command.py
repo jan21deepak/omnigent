@@ -162,6 +162,55 @@ def test_upgrade_force_skips_drain_and_force_stops(
     assert stop_calls == [True]
 
 
+def test_upgrade_survives_daemon_kill_permission_error(
+    monkeypatch: pytest.MonkeyPatch, _wheel_install: None
+) -> None:
+    """``upgrade`` continues when stopping the local daemon hits PermissionError."""
+    from unittest.mock import Mock
+
+    from omnigent.cli import _LOCAL_DAEMON_MARKER, _HostDaemonRecord, _stop_local_server_and_daemon
+
+    monkeypatch.setattr("omnigent.update_check.fetch_latest_version", lambda *_a, **_k: "0.2.0")
+    monkeypatch.setattr("omnigent.update_check._run_upgrade_command", lambda *_a, **_k: 0)
+    monkeypatch.setattr(
+        "omnigent.update_check._probe_installed_distribution", lambda: ("0.2.0", None)
+    )
+    # _wheel_install stubs server stop; restore the real path under test.
+    monkeypatch.setattr(
+        "omnigent.cli._stop_local_server_and_daemon", _stop_local_server_and_daemon
+    )
+    monkeypatch.setattr(
+        "omnigent.cli.local_server_url_if_healthy", lambda: "http://127.0.0.1:6767"
+    )
+    local_record = _HostDaemonRecord(
+        pid=42_424,
+        target="local",
+        mode="local",
+        server_url=None,
+        log_path=None,
+        started_at=0,
+    )
+    monkeypatch.setattr(
+        "omnigent.cli._find_daemon_record",
+        lambda target: local_record if target == _LOCAL_DAEMON_MARKER else None,
+    )
+    monkeypatch.setattr("omnigent.cli._HOST_DAEMON_STOP_GRACE_S", 0.0)
+
+    def _kill(_pid: int, _sig: int) -> None:
+        raise PermissionError("[Errno 1] Operation not permitted")
+
+    monkeypatch.setattr("omnigent.cli.os.kill", _kill)
+    monkeypatch.setattr("omnigent.cli._pid_alive", lambda _pid: True)
+    monkeypatch.setattr("omnigent.cli.time.sleep", lambda _s: None)
+    monkeypatch.setattr("omnigent.cli.stop_local_omnigent_server", Mock())
+    monkeypatch.setattr("omnigent.cli.stop_untracked_local_server", lambda: None)
+
+    result = CliRunner().invoke(cli, ["upgrade", "--force"])
+
+    assert result.exit_code == 0, result.output
+    assert "Upgraded to v0.2.0" in result.output
+
+
 def test_upgrade_install_failure_surfaces(
     monkeypatch: pytest.MonkeyPatch, _wheel_install: None
 ) -> None:
