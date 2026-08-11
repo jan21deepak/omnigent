@@ -32,6 +32,7 @@ from omnigent.harness_plugins import (
     PI_NATIVE_CODING_AGENT,
     harness_capabilities,
 )
+from omnigent.policies.native_tools import CLAUDE_NATIVE_EDIT_TOOLS as _CLAUDE_NATIVE_EDIT_TOOLS
 from omnigent.runner.routing import RunnerRouter
 from omnigent.server.host_registry import HostRegistry
 from omnigent.server.schemas import (
@@ -292,11 +293,6 @@ _BROWSER_ACTION_AWAIT_S = 30.0
 _BROWSER_ACTION_TIMEOUT_RESULT: dict[str, Any] = {
     "error": "browser action timed out — is the session open in the Omnigent desktop app?"
 }
-
-
-_CLAUDE_NATIVE_EDIT_TOOLS: frozenset[str] = frozenset(
-    {"Edit", "Write", "MultiEdit", "NotebookEdit"}
-)
 
 
 _CLAUDE_NATIVE_REMEMBER_INELIGIBLE_TOOLS: frozenset[str] = frozenset(

@@ -15,6 +15,8 @@ import shlex
 from collections.abc import Callable, Collection
 from typing import Any, TypeAlias
 
+from omnigent.policies.native_tools import CLAUDE_NATIVE_EDIT_TOOLS, claude_native_write_path
+
 # Heterogeneous JSON-shaped maps — the V0 policy event + decision payloads.
 _Json: TypeAlias = dict[str, Any]  # type: ignore[explicit-any]
 
@@ -552,12 +554,12 @@ def worktree_guard(
     :returns: An evaluator ``fn(event, config)`` returning a V0 decision.
     """
 
-    # Match Omnigent built-in OS write/edit, Claude/Codex native Write/Edit
-    # (surfaced via the PreToolUse hook), and Pi's native lowercase
-    # write/edit (surfaced via the pi ``tool_call`` hook). Pi uses the same
-    # ``path`` argument key as the Omnigent tools, so no Pi-specific arg
-    # branch is needed below.
-    _write_tools = {"sys_os_write", "sys_os_edit", "Write", "Edit", "MultiEdit", "write", "edit"}
+    # Match Omnigent built-in OS write/edit, Claude/Codex native write/edit tools
+    # (surfaced via the PreToolUse hook), and Pi's native lowercase write/edit
+    # (surfaced via the pi ``tool_call`` hook). Pi uses the same ``path``
+    # argument key as the Omnigent tools, so no Pi-specific arg branch is needed
+    # below.
+    _write_tools = {"sys_os_write", "sys_os_edit", "write", "edit"} | CLAUDE_NATIVE_EDIT_TOOLS
 
     def _evaluate(event: _Json, config: _Json) -> _Json:  # noqa: ARG001
         """
@@ -571,9 +573,8 @@ def worktree_guard(
         args = _tool_call(event, _write_tools)
         if args is None:
             return _ALLOW
-        # Omnigent tools use ``path``; Claude native tools use ``file_path``.
-        path = args.get("path") or args.get("file_path")
-        if not isinstance(path, str):
+        path = claude_native_write_path(args)
+        if not path:
             return _ALLOW
         # Backslashes are not valid in POSIX paths and could confuse
         # downstream processing into treating them as separators, slipping a
@@ -602,7 +603,7 @@ def read_only_os(
     Factory: deny every file-mutating tool call (report-only agents).
 
     DENIES ``sys_os_write`` / ``sys_os_edit`` and the Claude/Codex/Pi native
-    ``Write`` / ``Edit`` / ``MultiEdit`` aliases. Reads, searches, and shell
+    ``Write`` / ``Edit`` / ``MultiEdit`` / ``NotebookEdit`` aliases. Reads, searches, and shell
     commands are left untouched — pair with :func:`blast_radius` to also bound
     shell blast radius. Use on agents whose contract is to investigate and
     report, never to change code (e.g. a security reviewer and its read-only
@@ -614,18 +615,10 @@ def read_only_os(
         write/edit tool call, ALLOW otherwise.
     """
 
-    # Match Omnigent built-in OS write/edit, Claude/Codex native Write/Edit/
-    # MultiEdit, and Pi's native lowercase write/edit — the same tool set
-    # worktree_guard gates, so the two write policies stay in lockstep.
-    write_tools = {
-        "sys_os_write",
-        "sys_os_edit",
-        "Write",
-        "Edit",
-        "MultiEdit",
-        "write",
-        "edit",
-    }
+    # Match Omnigent built-in OS write/edit, Claude/Codex native write/edit tools,
+    # and Pi's native lowercase write/edit — the same tool set worktree_guard gates,
+    # so the two write policies stay in lockstep.
+    write_tools = {"sys_os_write", "sys_os_edit", "write", "edit"} | CLAUDE_NATIVE_EDIT_TOOLS
 
     def _evaluate(event: _Json, config: _Json) -> _Json:  # noqa: ARG001
         """
@@ -700,7 +693,8 @@ POLICY_REGISTRY: list[dict[str, object]] = [
         "kind": "factory",
         "name": "Restrict Writes to Git Worktree",
         "description": "Blocks file writes (sys_os_write/edit, Claude/Codex native "
-        "Write/Edit, and Pi native write/edit) outside the worker's git worktree to "
+        "Write/Edit/MultiEdit/NotebookEdit, and Pi native write/edit) "
+        "outside the worker's git worktree to "
         "prevent cross-branch contamination",
     },
     {
@@ -708,7 +702,8 @@ POLICY_REGISTRY: list[dict[str, object]] = [
         "kind": "factory",
         "name": "Report-Only (Deny File Writes)",
         "description": "Denies every file-mutating tool (sys_os_write/edit, Claude/Codex "
-        "native Write/Edit/MultiEdit, and Pi native write/edit) so a report-only agent "
+        "native Write/Edit/MultiEdit/NotebookEdit, and Pi native write/edit) "
+        "so a report-only agent "
         "can read and run shell but never change code",
     },
 ]

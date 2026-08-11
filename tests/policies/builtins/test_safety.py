@@ -54,10 +54,12 @@ def test_ask_on_os_tools_asks_for_sys_os_tools(tool: str) -> None:
         ("Read", {"path": "/etc/passwd"}, "/etc/passwd"),
         ("Write", {"path": "/tmp/out.txt"}, "/tmp/out.txt"),
         ("Edit", {"path": "main.py"}, "main.py"),
+        ("MultiEdit", {"file_path": "main.py", "edits": []}, "main.py"),
+        ("NotebookEdit", {"notebook_path": "analysis.ipynb"}, "analysis.ipynb"),
         ("Glob", {"pattern": "**/*.py"}, "**/*.py"),
         ("Grep", {"pattern": "secret"}, "secret"),
     ],
-    ids=["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
+    ids=["Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit", "Glob", "Grep"],
 )
 def test_ask_on_os_tools_asks_for_native_tools(
     tool: str,

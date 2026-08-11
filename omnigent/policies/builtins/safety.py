@@ -13,6 +13,7 @@ import json as _json
 import re as _re
 from typing import Literal
 
+from omnigent.policies.native_tools import CLAUDE_NATIVE_EDIT_TOOLS, claude_native_write_path
 from omnigent.policies.schema import (
     PolicyCallable,
     PolicyEvent,
@@ -29,7 +30,7 @@ _SYS_OS_TOOLS = frozenset({"sys_os_read", "sys_os_write", "sys_os_edit", "sys_os
 # PostToolUse hook contract (see ``omnigent.native_policy_hook``).
 # These bypass Omnigent' ``sys_os_*`` MCP tools and execute directly
 # inside the CLI subprocess.
-_NATIVE_OS_TOOLS = frozenset({"Bash", "Read", "Write", "Edit", "Glob", "Grep"})
+_NATIVE_OS_TOOLS = frozenset({"Bash", "Read", "Glob", "Grep"}) | CLAUDE_NATIVE_EDIT_TOOLS
 
 # Cursor SDK native tool names surfaced via the preToolUse hook
 # (see ``omnigent.inner.cursor_policy_hook``). Cursor uses ``Shell``
@@ -222,8 +223,8 @@ def ask_on_os_tools(event: PolicyEvent) -> PolicyResponse:
     - **Omnigent built-in OS tools** (``sys_os_read``,
       ``sys_os_write``, ``sys_os_edit``, ``sys_os_shell``).
     - **Claude Code native tools** (``Bash``, ``Read``, ``Write``,
-      ``Edit``, ``Glob``, ``Grep``) — surfaced via the
-      ``PreToolUse`` hook contract.
+      ``Edit``, ``MultiEdit``, ``NotebookEdit``, ``Glob``, ``Grep``)
+      — surfaced via the ``PreToolUse`` hook contract.
     - **Codex native tools** — uses the same ``PreToolUse`` hook
       contract with the same tool names (e.g. ``Bash``).
     - **Cursor SDK native tools** (``Shell``) — surfaced via the
@@ -272,10 +273,7 @@ def ask_on_os_tools(event: PolicyEvent) -> PolicyResponse:
         elif tool == "execute_code":
             preview = args.get("code", "")[:80] if isinstance(args, dict) else ""
         else:
-            # Omnigent tools use ``path``; Claude native tools use ``file_path``.
-            preview = (
-                (args.get("path") or args.get("file_path", "")) if isinstance(args, dict) else ""
-            )
+            preview = claude_native_write_path(args) if isinstance(args, dict) else ""
         return {
             "result": "ASK",
             "reason": f"Agent wants to call {tool}({preview!r}). Approve?",
@@ -706,7 +704,7 @@ POLICY_REGISTRY: list[dict[str, object]] = [
         "name": "Require Approval for File & Shell Operations",
         "description": "Asks for user approval before any file or shell tool call — "
         "covers Omnigent sys_os_* tools, Claude Code native tools "
-        "(Bash, Read, Write, Edit, Glob, Grep), Codex native tools, "
+        "(Bash, Read, Write, Edit, MultiEdit, NotebookEdit, Glob, Grep), Codex native tools, "
         "opencode native tools (bash, edit, read, grep, glob), "
         "and Hermes Agent tools (terminal, execute_code, read_file, write_file, search_files)",
         "params_schema": None,
