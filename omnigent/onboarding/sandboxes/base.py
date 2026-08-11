@@ -647,14 +647,15 @@ class SandboxExecTransport(SandboxLifecycle):
         :param command: Shell command to background, e.g.
             ``"ENV=val omnigent host --server https://…"``.
         :param log_path: Where stdout/stderr of the backgrounded process
-            are redirected inside the sandbox.
+            are appended inside the sandbox (preserves prior host output on
+            relaunch).
         :returns: A synthetic result with ``stdout="launched\\n"`` on success.
         :raises click.ClickException: If the launch command fails.
         """
         return self.run(
             sandbox_id,
             f"setsid nohup sh -c {shlex.quote(command)} "
-            f"> {log_path} 2>&1 < /dev/null & echo launched",
+            f">> {log_path} 2>&1 < /dev/null & echo launched",
         )
 
     def put(self, sandbox_id: str, local_path: Path, remote_path: str) -> None:

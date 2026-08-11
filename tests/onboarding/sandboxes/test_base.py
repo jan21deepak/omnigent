@@ -72,7 +72,20 @@ def test_run_background_wraps_command_in_sh_c() -> None:
     [cmd] = launcher.commands
     assert cmd == (
         "setsid nohup sh -c 'FOO=bar omnigent host --server https://srv' "
-        "> /tmp/omnigent-host.log 2>&1 < /dev/null & echo launched"
+        ">> /tmp/omnigent-host.log 2>&1 < /dev/null & echo launched"
+    )
+
+
+def test_run_background_appends_to_log_path() -> None:
+    """``run_background`` must append to the log so a relaunch preserves prior output."""
+    launcher = _RecordingLauncher()
+
+    launcher.run_background("sb-1", "omnigent host", log_path="/tmp/custom.log")
+
+    [cmd] = launcher.commands
+    assert (
+        cmd
+        == "setsid nohup sh -c 'omnigent host' >> /tmp/custom.log 2>&1 < /dev/null & echo launched"
     )
 
 
