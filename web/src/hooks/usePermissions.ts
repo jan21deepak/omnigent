@@ -5,6 +5,7 @@
 
 import { useMemo } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { getCurrentUserId } from "@/lib/identity";
 import {
   type Permission,
   derivePermissionLevel,
@@ -77,6 +78,24 @@ export function useRevokePermission(sessionId: string) {
     mutationFn: (userId: string) => revokePermission(sessionId, userId),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: permissionsKey(sessionId) });
+    },
+  });
+}
+
+/** Revoke the current user's grant on a shared session (self-leave). */
+export function useLeaveSession(sessionId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const userId = getCurrentUserId();
+      if (!userId) {
+        throw new Error("User identity is not available");
+      }
+      await revokePermission(sessionId, userId);
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: permissionsKey(sessionId) });
+      void qc.invalidateQueries({ queryKey: ["conversations"] });
     },
   });
 }
