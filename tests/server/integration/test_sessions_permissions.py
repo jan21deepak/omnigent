@@ -414,7 +414,7 @@ async def test_full_permission_lifecycle(
     3. bryan reassigns corey to read (level 1) via upsert
     4. bryan grants rice edit (level 2) on S1
     5. bryan revokes corey entirely
-    6. bryan tries to revoke own manage -> 403 (self-revoke blocked)
+    6. bryan tries to revoke own owner grant -> 403 (owners cannot leave)
     7. Verify DB state: only bryan (manage) and rice (edit)
     8. rice lists sessions -> sees S1
     9. corey lists sessions -> sees nothing
@@ -482,20 +482,21 @@ async def test_full_permission_lifecycle(
     # Revoke returns 204 No Content.
     assert resp.status_code == 204, f"revoke failed: {resp.status_code} {resp.text}"
 
-    # Step 6: bryan tries to revoke own manage -> 403
+    # Step 6: bryan tries to revoke own owner grant -> 403
     resp = await _revoke_permission(
         auth_client,
         session_id,
         revoker="bryan",
         target_user="bryan",
     )
-    # Self-revoke of a manage grant is blocked to prevent orphaned
-    # sessions. The route returns 403 (FORBIDDEN).
+    # Owners cannot leave via self-revoke — they archive or delete instead.
     assert resp.status_code == 403, (
-        f"Expected 403 for self-revoke of manage grant, "
-        f"got {resp.status_code}. If 204, the self-revoke guard "
+        f"Expected 403 for owner self-revoke, "
+        f"got {resp.status_code}. If 204, the owner guard "
         f"is broken and the session could be orphaned."
     )
+    body = resp.json()
+    assert "Cannot revoke owner permissions" in body["error"]["message"]
 
     # Step 7: verify DB state via list_permissions
     resp = await _list_permissions(
@@ -1586,15 +1587,10 @@ async def test_self_grant_blocked_at_any_level(
 # ── Self-revoke blocked (general) ──────────────────────────
 
 
-async def test_self_revoke_blocked(
+async def test_self_revoke_blocked_for_owner(
     auth_client: httpx.AsyncClient,
 ) -> None:
-    """The session owner cannot revoke themselves — self-modification is fully blocked.
-
-    The existing lifecycle test (step 6) checks self-revoke for the
-    owner. This test verifies the same guard independently and
-    confirms the error message explicitly mentions self-modification.
-    """
+    """The session owner cannot revoke themselves — they archive or delete instead."""
     agent = await create_test_agent(auth_client, user="bryan")
     s1 = await _create_session_as(auth_client, agent["id"], "bryan")
     session_id = s1["id"]
@@ -1605,19 +1601,77 @@ async def test_self_revoke_blocked(
         revoker="bryan",
         target_user="bryan",
     )
-    # Self-revoke must always be blocked. If 204, the
-    # ``target_user_id == user_id`` guard in revoke_permission
-    # is missing or was removed.
     assert resp.status_code == 403, (
-        f"Self-revoke should return 403, got {resp.status_code}. "
-        f"If 204, the self-modification guard is broken and the "
-        f"session could be orphaned."
+        f"Owner self-revoke should return 403, got {resp.status_code}. "
+        f"If 204, the owner guard is broken and the session could be orphaned."
     )
     body = resp.json()
-    assert "Cannot modify your own permissions" in body["error"]["message"], (
-        f"Expected 'Cannot modify your own permissions' in error "
+    assert "Cannot revoke owner permissions" in body["error"]["message"], (
+        f"Expected 'Cannot revoke owner permissions' in error "
         f"message, got {body['error']['message']!r}."
     )
+
+
+async def test_self_revoke_allowed_for_read_grantee(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    """A read-level grantee can remove their own grant with read access."""
+    agent = await create_test_agent(auth_client, user="bryan")
+    s1 = await _create_session_as(auth_client, agent["id"], "bryan")
+    session_id = s1["id"]
+
+    resp = await _grant_permission(
+        auth_client,
+        session_id,
+        granter="bryan",
+        target_user="corey",
+        level=LEVEL_READ,
+    )
+    assert resp.status_code == 200
+
+    resp = await _revoke_permission(
+        auth_client,
+        session_id,
+        revoker="corey",
+        target_user="corey",
+    )
+    assert resp.status_code == 204, (
+        f"Read grantee self-revoke should return 204, got {resp.status_code}: {resp.text}"
+    )
+
+    corey_sessions = await _list_sessions_as(auth_client, "corey")
+    assert session_id not in {s["id"] for s in corey_sessions}
+
+
+async def test_self_revoke_allowed_for_manage_grantee(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    """A manage-level guest can remove their own grant without manage on others."""
+    agent = await create_test_agent(auth_client, user="bryan")
+    s1 = await _create_session_as(auth_client, agent["id"], "bryan")
+    session_id = s1["id"]
+
+    resp = await _grant_permission(
+        auth_client,
+        session_id,
+        granter="bryan",
+        target_user="rice",
+        level=LEVEL_MANAGE,
+    )
+    assert resp.status_code == 200
+
+    resp = await _revoke_permission(
+        auth_client,
+        session_id,
+        revoker="rice",
+        target_user="rice",
+    )
+    assert resp.status_code == 204, (
+        f"Manage grantee self-revoke should return 204, got {resp.status_code}: {resp.text}"
+    )
+
+    rice_sessions = await _list_sessions_as(auth_client, "rice")
+    assert session_id not in {s["id"] for s in rice_sessions}
 
 
 # ── Multi-session list with mixed access ───────────────────

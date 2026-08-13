@@ -224,9 +224,11 @@ def register_permissions_routes(
     ) -> Response:
         """Revoke a user's permission on a session.
 
-        Requires manage-level access. Cannot revoke your own
-        manage grant (prevents orphaned sessions). Returns 204
-        whether or not the grant existed (idempotent).
+        Revoking **another** user's grant requires manage-level access.
+        Revoking **your own** grant requires only read access — giving
+        up access needs no privilege. Owner grants cannot be revoked
+        (including self-revoke; owners archive or delete instead).
+        Returns 204 whether or not the grant existed (idempotent).
 
         :param request: The incoming FastAPI request (for auth).
         :param session_id: Session to revoke access from,
@@ -235,21 +237,21 @@ def register_permissions_routes(
             e.g. ``"alice@example.com"``.
         :returns: 204 No Content.
         :raises OmnigentError: 404 if no session or no access,
-            403 if attempting to revoke own manage grant.
+            403 if attempting to revoke an owner grant.
         """
         user_id = _require_user(request, auth_provider)
+        is_self = target_user_id == user_id
         await _require_access(
-            user_id, session_id, LEVEL_MANAGE, permission_store, conversation_store
+            user_id,
+            session_id,
+            LEVEL_READ if is_self else LEVEL_MANAGE,
+            permission_store,
+            conversation_store,
         )
         if permission_store is None:
             raise OmnigentError(
                 "Permissions not enabled",
                 code=ErrorCode.INTERNAL_ERROR,
-            )
-        if target_user_id == user_id:
-            raise OmnigentError(
-                "Cannot modify your own permissions",
-                code=ErrorCode.FORBIDDEN,
             )
         existing = await asyncio.to_thread(permission_store.get, target_user_id, session_id)
         if existing is not None and existing.level == LEVEL_OWNER:

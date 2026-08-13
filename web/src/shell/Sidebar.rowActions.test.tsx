@@ -50,6 +50,7 @@ const mocks = vi.hoisted(() => {
     // mobile in-place project view test can assert both the list and the pick.
     projects: [] as string[],
     moveToProject: { mutate: vi.fn() },
+    leaveSession: { mutate: vi.fn(), isPending: false },
     conversations: [] as unknown[],
     pinnedStore,
   };
@@ -125,16 +126,21 @@ vi.mock("@/hooks/useConversations", () => ({
 vi.mock("./AgentTypeFilter", () => ({ AgentTypeFilter: () => null }));
 vi.mock("./ReportIssueButton", () => ({ ReportIssueButton: () => null }));
 vi.mock("@/components/PermissionsModal", () => ({ PermissionsModal: () => null }));
+vi.mock("@/hooks/usePermissions", () => ({
+  useLeaveSession: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
+}));
 // Force a multi-user (non-local) server so the "Shared with me" tab renders —
 // jsdom's default loopback origin would otherwise read as single-user and hide
 // the tabs the shared-session row actions rely on.
 vi.mock("@/lib/serverOrigin", () => ({ isCurrentServerLocal: () => false }));
 
 import { type Conversation, useConversations } from "@/hooks/useConversations";
+import { useLeaveSession } from "@/hooks/usePermissions";
 import { resetReadStateForTests, seedReadState } from "@/hooks/useUnseenConversations";
 import { Sidebar } from "./Sidebar";
 
 const useConvMock = vi.mocked(useConversations);
+const useLeaveSessionMock = vi.mocked(useLeaveSession);
 
 const CONV: Conversation = {
   id: "conv_1",
@@ -233,10 +239,12 @@ function renderSidebar(activeId?: string, info?: ServerInfo) {
 beforeEach(() => {
   mocks.rename.mutate.mockReset();
   mocks.moveToProject.mutate.mockReset();
+  mocks.leaveSession.mutate.mockReset();
   mocks.projects = [];
   // Default every test to the desktop viewport; the mobile flyout test opts in.
   mocks.isMobile = false;
   useConvMock.mockReset();
+  useLeaveSessionMock.mockReturnValue(mocks.leaveSession);
   localStorage.clear();
   // Reset the server pinned set between tests.
   mocks.pinnedStore.set([]);
@@ -527,6 +535,30 @@ describe("double-click to rename", () => {
 
     expect(screen.queryByTestId("rename-conversation-input")).toBeNull();
     expect(mocks.rename.mutate).not.toHaveBeenCalled();
+  });
+});
+
+describe("leave shared session", () => {
+  it("shows Leave session on a shared row and confirms before revoking", () => {
+    mockConversations([{ ...CONV, owner: "other@example.com" }]);
+    renderSidebar();
+    fireEvent.mouseDown(screen.getByTestId("sidebar-tab-shared"), { button: 0 });
+
+    fireEvent.pointerDown(screen.getByTestId("conversation-actions"), { button: 0 });
+    expect(screen.getByTestId("leave-conversation")).toBeInTheDocument();
+    expect(screen.queryByTestId("delete-conversation")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("leave-conversation"));
+    expect(screen.getByRole("dialog", { name: /Leave session/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Leave session$/i }));
+    expect(mocks.leaveSession.mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not show Leave session on an owned row", () => {
+    renderSidebar();
+    fireEvent.pointerDown(screen.getByTestId("conversation-actions"), { button: 0 });
+    expect(screen.queryByTestId("leave-conversation")).toBeNull();
   });
 });
 

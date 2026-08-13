@@ -33,6 +33,7 @@ import {
   ListChecksIcon,
   LaptopIcon,
   Loader2Icon,
+  LogOutIcon,
   MailIcon,
   Maximize2Icon,
   Minimize2Icon,
@@ -120,6 +121,7 @@ import {
   useStopAndDeleteConversation,
   useStopSession,
 } from "@/hooks/useConversations";
+import { useLeaveSession } from "@/hooks/usePermissions";
 import { useHosts, type Host } from "@/hooks/useHosts";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -2432,6 +2434,7 @@ function ConversationMenuItems({
   setIsEditing,
   setStopOpen,
   setDeleteOpen,
+  setLeaveOpen,
   setMenuOpen,
   runArchive,
 }: {
@@ -2460,6 +2463,7 @@ function ConversationMenuItems({
   setIsEditing: (editing: boolean) => void;
   setStopOpen: (open: boolean) => void;
   setDeleteOpen: (open: boolean) => void;
+  setLeaveOpen: (open: boolean) => void;
   // Closes the controlled kebab after a project pick; a no-op for the
   // (uncontrolled) context menu, which Radix closes on select automatically.
   setMenuOpen: (open: boolean) => void;
@@ -2636,8 +2640,18 @@ function ConversationMenuItems({
         ))}
       {/* Stop / Archive / Delete are grouped at the bottom, below a
           divider: lifecycle-ending actions separated from the everyday
-          ones above. */}
+          ones above. Shared sessions also offer Leave session here. */}
       <C.Separator />
+      {!isOwner && (
+        <C.Item
+          data-testid="leave-conversation"
+          variant="destructive"
+          onSelect={() => setLeaveOpen(true)}
+        >
+          <LogOutIcon className="size-3.5" />
+          Leave session
+        </C.Item>
+      )}
       {/* Stop session — only on stoppable sessions whose runner isn't
         already known-offline (canStop). Owner-gated like Delete:
         non-owners see it disabled with an explanatory tooltip. */}
@@ -2852,6 +2866,7 @@ function ConversationRow({
   // The kebab's user-facing "Stop session" action — separate mutation
   // instance so its pending/error state can't bleed into archiving's.
   const stopSession = useStopSession();
+  const leaveSession = useLeaveSession(conversation.id);
   const isArchived = conversation.archived === true;
   const [isEditing, setIsEditing] = useState(false);
   // Hold the list's sort order while this row's rename input is open — the
@@ -2868,6 +2883,7 @@ function ConversationRow({
     return () => reportRowEditing(conversation.id, false);
   }, [isEditing, conversation.id, reportRowEditing]);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [leaveOpen, setLeaveOpen] = useState(false);
   const [stopOpen, setStopOpen] = useState(false);
   // The kebab menu is controlled so the project submenu can close the whole
   // menu after a pick (a plain click inside the submenu wouldn't otherwise).
@@ -3084,6 +3100,15 @@ function ConversationRow({
     runDelete(args);
   }
 
+  function confirmLeave() {
+    setLeaveOpen(false);
+    leaveSession.mutate(undefined, {
+      onSuccess: () => {
+        if (activeIdRef.current === conversation.id) navigate("/", { replace: true });
+      },
+    });
+  }
+
   function runArchive() {
     const nextArchived = !isArchived;
     // Unarchiving is a quick flag flip — no status row.
@@ -3136,6 +3161,7 @@ function ConversationRow({
     setIsEditing,
     setStopOpen,
     setDeleteOpen,
+    setLeaveOpen,
     runArchive,
   };
 
@@ -3460,6 +3486,35 @@ function ConversationRow({
               disabled={del.isPending}
             >
               Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={leaveOpen} onOpenChange={setLeaveOpen}>
+        <DialogContent onClick={(e) => e.stopPropagation()}>
+          <DialogHeader>
+            <DialogTitle>Leave session?</DialogTitle>
+            <DialogDescription>
+              Remove <span className="font-medium break-all">{label}</span> from your sidebar. The
+              owner can share it with you again later.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="border-t-0 bg-transparent">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setLeaveOpen(false)}
+              disabled={leaveSession.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={confirmLeave}
+              disabled={leaveSession.isPending}
+            >
+              Leave session
             </Button>
           </DialogFooter>
         </DialogContent>
