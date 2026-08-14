@@ -1856,6 +1856,46 @@ describe("Composer config gear", () => {
     expect(setEffort).not.toHaveBeenCalled();
   });
 
+  it("claude-native model dropdown switches via setModel without leaking /model into the composer", async () => {
+    // Regression for chat-mode model dropdown injecting "/model <name>" into the
+    // composer/send path instead of PATCHing model_override (omnigent #4754).
+    const onSend = vi.fn();
+    const setModel = vi.fn().mockResolvedValue(undefined);
+    const options = [
+      { id: "opus", model: "opus", displayName: "Opus" },
+      { id: "sonnet", model: "sonnet", displayName: "Sonnet" },
+    ] as never;
+    useChatStore.setState({ setModel, codexModelOptions: options });
+    renderWithTooltips(
+      <Composer
+        {...composerProps({
+          onSend,
+          showModels: true,
+          modelPickerKind: "claude",
+          isNativeWrapper: true,
+          codexModelOptions: options,
+        })}
+      />,
+    );
+    const ta = textarea();
+    fireEvent.change(ta, { target: { value: "continue the refactor" } });
+
+    fireEvent.click(gear()!);
+    await screen.findByTestId("composer-config-modal");
+    fireEvent.click(document.querySelector('[data-testid="composer-config-model"]') as Element);
+    fireEvent.click(document.querySelector('[data-model-id="opus"]') as Element);
+    // Draft only — composer text and send path stay untouched.
+    expect(ta.value).toBe("continue the refactor");
+    expect(onSend).not.toHaveBeenCalled();
+    expect(setModel).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("composer-config-save"));
+    await waitFor(() => expect(setModel).toHaveBeenCalledWith("opus"));
+    expect(ta.value).toBe("continue the refactor");
+    expect(onSend).not.toHaveBeenCalled();
+    expect(onSend).not.toHaveBeenCalledWith("/model opus", expect.anything());
+  });
+
   it("re-pins the model when turning Smart Routing off, even if the shown model is unchanged", async () => {
     // Routing-on clears the applied override but keeps the cross-session sticky
     // (selectedModel), so the modal shows that model as "resolved". Turning

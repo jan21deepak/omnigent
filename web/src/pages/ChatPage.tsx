@@ -4046,7 +4046,7 @@ export function Composer({
   // "Attach to agent" button). Drained into ``mentionedItems`` below, then
   // cleared from the store so they aren't re-applied.
   const pendingComposerAttachments = useChatStore((s) => s.pendingComposerAttachments);
-  // Nonce bumped when bare "/model" is submitted; opens the AgentPicker
+  // Nonce bumped when bare "/model" is submitted; opens the config modal
   // dropdown instead of sending (see submit()).
   const [pickerOpenNonce, setPickerOpenNonce] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
