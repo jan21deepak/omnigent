@@ -2878,6 +2878,46 @@ describe("chatStore — stop", () => {
     useChatStore.getState().stop();
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("ignores stale PTY running edges after stop so the interrupt button does not flicker", () => {
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      status: "idle",
+      sessionStatus: "idle",
+      activeResponse: { responseId: "resp_1", state: "cancelled", error: null },
+    });
+    seedConversationsCache([conv("conv_abc", "idle")]);
+
+    handleSessionEvent({
+      type: "session_status",
+      conversationId: "conv_abc",
+      status: "running",
+    });
+
+    const state = useChatStore.getState();
+    expect(state.sessionStatus).toBe("idle");
+    expect(state.status).toBe("idle");
+    expect(state.activeResponse?.state).toBe("cancelled");
+    expect(readConversationRows().find((c) => c.id === "conv_abc")?.status).toBe("idle");
+  });
+
+  it("does not auto-flush queued messages while the cancelled turn is still settling", () => {
+    useChatStore.setState({
+      conversationId: "conv_abc",
+      boundAgentId: "agent_xyz",
+      status: "idle",
+      sessionStatus: "idle",
+      activeResponse: { responseId: "resp_1", state: "cancelled", error: null },
+      queuedMessages: [
+        { queueId: "q_1", text: "next up", conversationId: "conv_abc", agentId: "agent_xyz" },
+      ],
+    });
+
+    useChatStore.getState().maybeFlushQueuedHead();
+
+    expect(useChatStore.getState().queuedMessages).toHaveLength(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("chatStore — handleSessionEvent (session.* events)", () => {
@@ -4378,22 +4418,60 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
   });
 
   describe("session.interrupted", () => {
-    it("sets activeResponse.state to 'cancelled'", () => {
+    it("sets activeResponse.state to 'cancelled' and clears working status", () => {
       useChatStore.setState({
         activeResponse: { responseId: "resp_1", state: "streaming", error: null },
+        status: "streaming",
+        sessionStatus: "running",
+        backgroundTaskCount: 2,
       });
 
       const event: SessionInterruptedEvent = {
         type: "session_interrupted",
         requestedAt: 1704067200,
+        responseId: "resp_1",
       };
       handleSessionEvent(event);
 
-      expect(useChatStore.getState().activeResponse).toEqual({
+      const state = useChatStore.getState();
+      expect(state.activeResponse).toEqual({
         responseId: "resp_1",
         state: "cancelled",
         error: null,
       });
+      expect(state.status).toBe("idle");
+      expect(state.sessionStatus).toBe("idle");
+      expect(state.backgroundTaskCount).toBe(0);
+      expect(state.interruptedResponseIds).toEqual(["resp_1"]);
+    });
+
+    it("releases the queue flush once a cancelled turn settles idle", async () => {
+      seedSession("conv_abc");
+      useChatStore.setState({
+        conversationId: "conv_abc",
+        boundAgentId: "agent_xyz",
+        status: "idle",
+        sessionStatus: "idle",
+        activeResponse: { responseId: "resp_1", state: "cancelled", error: null },
+        interruptedResponseIds: ["resp_1"],
+        queuedMessages: [
+          { queueId: "q_1", text: "next up", conversationId: "conv_abc", agentId: "agent_xyz" },
+        ],
+      });
+
+      handleSessionEvent({
+        type: "session_status",
+        conversationId: "conv_abc",
+        status: "idle",
+        responseId: "resp_1",
+      });
+
+      expect(useChatStore.getState().activeResponse).toBeNull();
+
+      useChatStore.getState().maybeFlushQueuedHead();
+      await tick();
+
+      expect(useChatStore.getState().queuedMessages).toHaveLength(0);
     });
 
     it("is a no-op when there is no active response", () => {
@@ -7546,13 +7624,10 @@ describe("chatStore — live delta streaming (claude-native)", () => {
     expect(textBlocks).toHaveLength(1);
     expect(textBlocks[0]!.ctx.itemId).toBe("ci_partial");
     expect(textBlocks[0]!.fullText).toBe("partial answer");
-    expect(state.activeResponse).toEqual({
-      responseId: "codex_turn_123",
-      state: "cancelled",
-      error: null,
-    });
+    // Idle after interrupt releases the send gate; decoration lives in
+    // interruptedResponseIds.
+    expect(state.activeResponse).toBeNull();
     expect(state.interruptedResponseIds).toEqual(["codex_turn_123"]);
-    useChatStore.setState({ activeResponse: null });
     const settledState = useChatStore.getState();
     const bubbles = buildBubbles(
       settledState.blocks,

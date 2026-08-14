@@ -1035,7 +1035,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       s.conversationId === null ||
       s.boundAgentId === null ||
       s.status === "streaming" ||
-      s.sessionStatus === "running"
+      s.sessionStatus === "running" ||
+      s.activeResponse?.state === "cancelled"
     ) {
       return;
     }
@@ -3549,6 +3550,12 @@ export async function pumpStreamEvents(
       if (get().conversationId !== id) return "switched";
 
       if (block.type === "response_start") {
+        const active = get().activeResponse;
+        if (active?.state === "cancelled" && active.responseId === block.responseId) {
+          // Trailing response markers from a user-cancelled turn — ignore so
+          // the optimistic stop state isn't reopened by late stream frames.
+          continue;
+        }
         // New response: force-flush whatever is buffered, then land the
         // marker + lifecycle in one commit. Reset the first-paint latch.
         paintedFirstContent = false;
@@ -4224,7 +4231,11 @@ export function handleSessionEvent(event: StreamEvent): void {
       // Captured BEFORE the patch below adopts event.responseId, so a
       // running/waiting status carrying an unseen id marks a new turn.
       const prevResponseId = useChatStore.getState().activeResponse?.responseId;
+      const ignoreStaleRunning = isStaleRunningAfterInterrupt(useChatStore.getState(), event);
       useChatStore.setState((s) => {
+        if (isStaleRunningAfterInterrupt(s, event)) {
+          return {};
+        }
         // `sessionStatus` tracks the server's session-level status 1:1 — a
         // server `idle` means the session is idle, full stop, and the
         // "Working…" indicator (which reads only `sessionStatus`) turns off.
@@ -4251,7 +4262,11 @@ export function handleSessionEvent(event: StreamEvent): void {
         } else if (event.status === "running" || event.status === "failed") {
           patch.backgroundTaskCount = 0;
         }
-        if (event.responseId !== undefined && event.status === "running") {
+        if (
+          event.responseId !== undefined &&
+          event.status === "running" &&
+          s.activeResponse?.state !== "cancelled"
+        ) {
           patch.status = "streaming";
           patch.activeResponse = {
             responseId: event.responseId,
@@ -4272,7 +4287,12 @@ export function handleSessionEvent(event: StreamEvent): void {
         if (event.status === "idle" || event.status === "failed" || event.status === "waiting") {
           if (event.responseId !== undefined && s.activeResponse?.responseId === event.responseId) {
             patch.status = "idle";
-            if (s.activeResponse.state !== "cancelled") {
+            if (s.activeResponse.state === "cancelled") {
+              // Turn settled after a user interrupt — release the send gate and
+              // queued-message flush while the bubble keeps its decoration via
+              // interruptedResponseIds.
+              patch.activeResponse = null;
+            } else {
               patch.activeResponse = {
                 responseId: event.responseId,
                 state: event.status === "failed" ? "failed" : "completed",
@@ -4291,6 +4311,14 @@ export function handleSessionEvent(event: StreamEvent): void {
             if (s.activeResponse?.state === "streaming") {
               patch.activeResponse = { ...s.activeResponse, state: "completed", error: null };
             }
+          } else if (
+            s.activeResponse?.state === "cancelled" &&
+            (event.status === "idle" || event.status === "waiting")
+          ) {
+            // PTY idle/waiting after interrupt often omits response_id; still
+            // release the cancelled turn's send/queue gate.
+            patch.status = "idle";
+            patch.activeResponse = null;
           }
           // Clear ALL pending user messages on terminal status. Any
           // message still pending when the session reaches idle was
@@ -4365,11 +4393,13 @@ export function handleSessionEvent(event: StreamEvent): void {
       // chat's "Working…" indicator — the exact desync users hit on a
       // claude-native session (chat clears/sets working instantly while
       // the sidebar dot stays stale).
-      patchConversationStatusInCache(
-        event.conversationId,
-        event.status,
-        useChatStore.getState().backgroundTaskCount,
-      );
+      if (!ignoreStaleRunning) {
+        patchConversationStatusInCache(
+          event.conversationId,
+          event.status,
+          useChatStore.getState().backgroundTaskCount,
+        );
+      }
       // On turn completion, refresh the Agents-rail preview for this
       // conversation. A child (added agent) finishing a turn leaves a stale
       // last_message_preview in its parent's child-sessions list (the runner
@@ -4512,6 +4542,17 @@ export function handleSessionEvent(event: StreamEvent): void {
           };
         });
       }
+      useChatStore.setState((s) => {
+        const patch: Partial<ChatState> = {
+          status: "idle",
+          sessionStatus: "idle",
+          backgroundTaskCount: 0,
+        };
+        if (s.activeResponse?.state === "streaming") {
+          patch.activeResponse = { ...s.activeResponse, state: "cancelled", error: null };
+        }
+        return patch;
+      });
       finalizeCurrentActive("cancelled", event.responseId);
       return;
     case "session_created":
@@ -4815,6 +4856,24 @@ async function* tapSessionEvents(events: AsyncIterable<StreamEvent>): AsyncItera
     handleSessionEvent(event);
     yield event;
   }
+}
+
+/**
+ * True when a live `session.status: running` edge belongs to a turn the user
+ * already cancelled. Claude-native keeps emitting id-less PTY running/idle
+ * oscillations until the Stop hook lands; applying them would reopen the
+ * streaming lifecycle and flicker the chat stop button.
+ */
+function isStaleRunningAfterInterrupt(
+  s: ChatState,
+  event: { status: string; responseId?: string },
+): boolean {
+  if (event.status !== "running") return false;
+  const cancelledId = s.activeResponse?.state === "cancelled" ? s.activeResponse.responseId : null;
+  if (cancelledId !== null) {
+    return event.responseId === undefined || event.responseId === cancelledId;
+  }
+  return event.responseId !== undefined && s.interruptedResponseIds.includes(event.responseId);
 }
 
 /**
