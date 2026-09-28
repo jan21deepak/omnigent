@@ -329,9 +329,16 @@ function windowHasFocus(): boolean {
  * Marks the active conversation as seen on mount, on every poll
  * refresh (updatedAt change keeps the stored time fresh), on the
  * window regaining focus, and on cleanup (navigation away).
- * Wall-clock time is stored so any server-side update that happened
- * while the user was viewing is captured, even if the conversations
- * poll hadn't picked it up yet.
+ *
+ * The baseline is anchored to `max(nowSeconds(), updatedAt)`: the dot
+ * compares the row's SERVER-domain `updated_at` against it, so when the
+ * server clock runs ahead of the client the wall-clock-only baseline
+ * stays below the very content the user just read and the dot re-lights
+ * an already-read session on every reopen / focus / poll. Anchoring to
+ * the row's `updated_at` covers everything committed as of the last
+ * refresh; the `nowSeconds()` floor still captures server-side updates
+ * that happened while viewing but haven't reached the poll yet, and
+ * keeps behavior identical when the clocks agree.
  *
  * Every mark is gated on the window having focus: a thread open in a
  * blurred window is NOT being read, so a turn finishing there must
@@ -367,7 +374,11 @@ export function useMarkConversationSeen(
   useEffect(() => {
     if (!conversationId || updatedAt === undefined) return;
     const markIfFocused = () => {
-      if (windowHasFocus()) markConversationSeen(conversationId);
+      // Anchor to the row's server-domain `updated_at` when it runs past
+      // the client clock (skew), so reading a thread always covers its
+      // current content and the dot can't re-light it without genuinely
+      // newer activity. See the doc comment above.
+      if (windowHasFocus()) markConversationSeen(conversationId, Math.max(nowSeconds(), updatedAt));
     };
     markIfFocused();
     window.addEventListener("focus", markIfFocused);
