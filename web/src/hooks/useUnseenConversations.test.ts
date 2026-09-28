@@ -238,6 +238,48 @@ describe("useMarkConversationSeen", () => {
     expect(lastPutBody()).toEqual({ last_seen: 5_000, unread: false });
   });
 
+  it("anchors the baseline to the row's updated_at when the server clock runs ahead", async () => {
+    // Clock-domain mismatch: the row's `updated_at` is a SERVER timestamp,
+    // and the client's wall clock can lag it (hosted server vs. a laptop).
+    // Opening and reading the thread must still cover its current content —
+    // otherwise the red dot re-lights the just-read session on every
+    // reopen / focus / poll until the client clock passes the server's
+    // timestamp. Client clock here reads 5_000 while the row says 6_000 and
+    // the user's prior baseline sits at 5_900 (their earlier read).
+    const mod = await loadFresh();
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: 5_900, updated_at: 6_000 }]);
+    setWindowFocused(true);
+    vi.useFakeTimers({ now: 5_000_000 });
+
+    renderHook(() => mod.useMarkConversationSeen("conv-1", 6_000));
+
+    // Content already read (updated_at 6_000) must not light the dot…
+    expect(mod.isConversationUnseen("conv-1", 6_000, "idle")).toBe(false);
+    // …while genuinely newer activity still does.
+    expect(mod.isConversationUnseen("conv-1", 7_000, "idle")).toBe(true);
+    // The PUT carries the server-domain baseline so other devices agree.
+    expect(lastPutBody()).toEqual({ last_seen: 6_000, unread: false });
+  });
+
+  it("re-anchors on every poll refresh while the client clock stays behind", async () => {
+    // A turn finishing while the thread is open bumps the row's updated_at
+    // past the (lagging) client clock; the next poll delivers the new
+    // timestamp, the mark re-fires, and the dot must stay off — reading the
+    // live thread keeps covering whatever the server has committed.
+    const mod = await loadFresh();
+    mod.seedReadState([{ id: "conv-1", viewer_last_seen: null, updated_at: 6_000 }]);
+    setWindowFocused(true);
+    vi.useFakeTimers({ now: 5_000_000 });
+
+    const { rerender } = renderHook(({ at }) => mod.useMarkConversationSeen("conv-1", at), {
+      initialProps: { at: 6_000 },
+    });
+    rerender({ at: 6_500 }); // poll delivers the in-flight turn's completion
+
+    expect(mod.isConversationUnseen("conv-1", 6_500, "idle")).toBe(false);
+    expect(mod.isConversationUnseen("conv-1", 6_600, "idle")).toBe(true);
+  });
+
   it("does NOT mark seen while the window is blurred", async () => {
     const mod = await loadFresh();
     mod.seedReadState([]);
