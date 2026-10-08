@@ -3151,6 +3151,65 @@ def test_inject_user_message_ignores_prompt_glyph_in_scrollback(
         inject_user_message(bridge_dir, content="hi", timeout_s=0.3)
 
 
+def test_inject_user_message_gives_up_on_unanswered_permission_dialog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A message sent behind an unanswered Claude dialog fails within the gate.
+
+    Regression for issue #117: a message buffered behind a pending
+    permission/confirmation dialog must not wait for the dialog
+    indefinitely. If delivery blocked until someone answered, the runner
+    turn would stay in flight and ``has_active_work`` would pin the idle
+    watchdog forever. The readiness gate is bounded by ``timeout_s``, so
+    the turn fails and releases the runner instead. No keystrokes may be
+    typed into the dialog.
+    """
+    monkeypatch.setattr("omnigent.claude_native_bridge._TRUSTED_PARENT", tmp_path)
+    bridge_dir = tmp_path / "bridge"
+    write_tmux_target(
+        bridge_dir,
+        socket_path=Path("/tmp/example/tmux.sock"),
+        tmux_target="claude:0.0",
+    )
+    dialog_pane = "\n".join(
+        [
+            "⏺ Bash(rm -rf build)",
+            "────────────────────────────────────────",
+            " Bash command",
+            "   rm -rf build",
+            " Do you want to proceed?",
+            " ❯ 1. Yes",
+            "   2. No, and tell Claude what to do differently (esc)",
+            "",
+            " Esc to cancel",
+        ]
+    )
+    send_keys: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        """
+        Always report the unanswered permission dialog.
+
+        :param cmd: Argv list passed to subprocess.run.
+        :param kwargs: Subprocess kwargs (ignored).
+        :returns: Fake CompletedProcess; capture-pane returns the dialog.
+        """
+        del kwargs
+        if "capture-pane" in cmd:
+            return SimpleNamespace(returncode=0, stdout=dialog_pane, stderr="")
+        send_keys.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match="did not become ready"):
+        inject_user_message(bridge_dir, content="are you there?", timeout_s=0.3)
+    assert time.monotonic() - started < 5.0
+    assert send_keys == [], "no keystrokes should be typed into a pending dialog"
+
+
 def test_inject_user_message_resends_enter_when_first_submit_swallowed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

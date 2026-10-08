@@ -203,6 +203,72 @@ async def test_run_turn_rejects_stale_session_after_clear(
 
 
 @pytest.mark.asyncio
+async def test_run_turn_ends_when_pending_dialog_blocks_injection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    A turn sent behind an unanswered Claude dialog ends instead of waiting.
+
+    Regression for issue #117: the readiness gate in
+    ``inject_user_message`` times out when a permission dialog hides the
+    composer. The executor must surface that as a terminal
+    ``ExecutorError`` so the runner turn clears and the idle watchdog is
+    not pinned by a prompt nobody answers.
+    """
+
+    def blocked_inject_user_message(
+        bridge_dir_arg: Path,
+        *,
+        content: str,
+        timeout_s: float = 30.0,
+    ) -> None:
+        """
+        Simulate the readiness gate timing out behind a pending dialog.
+
+        :param bridge_dir_arg: Bridge directory passed by the executor.
+        :param content: Text that would be typed into tmux.
+        :param timeout_s: tmux-target readiness timeout.
+        :returns: Never returns.
+        :raises RuntimeError: Always, like the real readiness gate.
+        """
+        del bridge_dir_arg, content, timeout_s
+        raise RuntimeError("Claude Code terminal did not become ready within 30.0s")
+
+    monkeypatch.setattr(
+        claude_native_executor,
+        "inject_user_message",
+        blocked_inject_user_message,
+    )
+
+    executor = ClaudeNativeExecutor(tmp_path)
+    events = await asyncio.wait_for(
+        _collect_events(
+            executor.run_turn(
+                messages=[{"role": "user", "content": "are you there?"}],
+                tools=[],
+                system_prompt="ignored",
+            )
+        ),
+        timeout=5.0,
+    )
+
+    assert len(events) == 1
+    assert isinstance(events[0], ExecutorError)
+    assert "did not become ready" in events[0].message
+
+
+async def _collect_events(stream: Any) -> list[Any]:
+    """
+    Drain an executor event stream into a list.
+
+    :param stream: Async iterator returned by ``run_turn``.
+    :returns: All yielded events in order.
+    """
+    return [event async for event in stream]
+
+
+@pytest.mark.asyncio
 async def test_enqueue_session_message_rejects_stale_session_after_clear(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
